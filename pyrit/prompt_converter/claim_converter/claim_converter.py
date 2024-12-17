@@ -51,30 +51,12 @@ sections = [
     "inferences_to_generations",
 ]
 # utterances = utils.read_json(pathlib.Path(__file__).parent / config["utterances"])
-# load few shot exemplars
-few_shot_sources: dict[str, dict] = {}
-for section in sections:
-    sources = config["few_shot"][section]
-    few_shot_sources[section] = {}
-    for source in sources:
-        # `load_few_shot_sources` is wrapped with experimental singleton so
-        # there will be no duplicated data in memory
-        data = exemplars.load_few_shot_source(
-            source=source,
-            few_shot_dir=pathlib.Path(__file__).parent / config["few_shot"]["data_dir"],
-            max_n=500,
-            premise_first=section != "inferences_to_generations",  # premises are usually longer
-            max_hypothesis_toks=6,
-            max_sent_toks=50,
-        )
-        if data is not None:
-            few_shot_sources[section][source] = data
-
 
 class ClaimConverter(PromptConverter):
     clicked = False
     response_msg = ""
     claim_classifier = None
+    few_shot_sources = None
 
     def __init__(self, *, converter_target: PromptChatTarget, prompt_template=None):
         self.converter_target = converter_target
@@ -87,6 +69,25 @@ class ClaimConverter(PromptConverter):
             body_learning_rate=clf_config["setfit"]["body_learning_rate"],
             batch_size=clf_config["setfit"]["batch_size"],
         )
+
+        # load few shot exemplars
+        self.few_shot_sources: dict[str, dict] = {}
+        for section in sections:
+            sources = config["few_shot"][section]
+            self.few_shot_sources[section] = {}
+            for source in sources:
+                # `load_few_shot_sources` is wrapped with experimental singleton so
+                # there will be no duplicated data in memory
+                data = exemplars.load_few_shot_source(
+                    source=source,
+                    few_shot_dir=pathlib.Path(__file__).parent / config["few_shot"]["data_dir"],
+                    max_n=500,
+                    premise_first=section != "inferences_to_generations",  # premises are usually longer
+                    max_hypothesis_toks=6,
+                    max_sent_toks=50,
+                )
+                if data is not None:
+                    self.few_shot_sources[section][source] = data
 
         # set to default strategy if not provided
         # prompt_template = (
@@ -151,7 +152,7 @@ class ClaimConverter(PromptConverter):
         produced_claims = prompt_openai.run_pipeline_per_source(
             instance=prompt,  # utterances[0],
             target_n=20,
-            few_shot_sources=few_shot_sources["utterances_to_claims"],
+            few_shot_sources=self.few_shot_sources["utterances_to_claims"],
             engine=config["openai_engine"],
         )
 
@@ -199,9 +200,9 @@ class ClaimConverter(PromptConverter):
             instance=initial_claim,
             target_n=20,
             few_shot_sources={
-                k: few_shot_sources["claims_to_inferences"][k]
+                k: self.few_shot_sources["claims_to_inferences"][k]
                 for k in inference_sources
-                if k in few_shot_sources["claims_to_inferences"]
+                if k in self.few_shot_sources["claims_to_inferences"]
             },
             engine=config["openai_engine"],
         )
@@ -226,7 +227,7 @@ class ClaimConverter(PromptConverter):
 
         result = prompt_openai.run_pipeline_per_source(
             instance=inferences_selected,
-            few_shot_sources=few_shot_sources["inferences_to_generations"],
+            few_shot_sources=self.few_shot_sources["inferences_to_generations"],
             target_n=num_gen_samples,  # //len(inferences_selected),
             one_output_per_exemplar=False,
             exemplars_per_prompt=3,

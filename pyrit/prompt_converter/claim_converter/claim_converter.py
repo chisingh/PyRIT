@@ -12,7 +12,6 @@ import time
 import ipywidgets as widgets
 from IPython.display import display
 
-from pyrit.datasets import fetch_testgenie_dataset
 from pyrit.exceptions import (
     InvalidJsonException,
     pyrit_json_retry,
@@ -23,7 +22,6 @@ from pyrit.prompt_converter import PromptConverter, ConverterResult
 
 from pyrit.prompt_converter.claim_converter import (
     config as conf,
-    utils,
     prompt_openai,
     exemplars,
     components,
@@ -38,8 +36,6 @@ logger.setLevel(logging.DEBUG)
 
 config_path = pathlib.Path(__file__).parent / "_default.yaml"
 config = conf.load_config(config_path)
-
-# testgenie_dataset = fetch_testgenie_dataset()
 
 # Define an asyncio event
 checkbox_event = asyncio.Event()
@@ -79,6 +75,7 @@ class ClaimConverter(PromptConverter):
     clicked = False
     response_msg = ""
     claim_classifier = None
+
     def __init__(self, *, converter_target: PromptChatTarget, prompt_template=None):
         self.converter_target = converter_target
 
@@ -283,7 +280,7 @@ class ClaimConverter(PromptConverter):
             submit_event.set()
             # global clicked
             self.clicked = True
-            
+
             # Proceed with the rest of the convert_async logic
             selected_options = checkbox.value
             # print(f"Final selected options: {selected_options}")
@@ -392,10 +389,10 @@ class ClaimConverter(PromptConverter):
         if not self.clicked:
             with ui_events() as poll:
                 while not self.clicked:
-                    poll(10) # poll queued UI events including button
-                    time.sleep(1) # wait for 1 second before checking again
+                    poll(10)  # poll queued UI events including button
+                    time.sleep(1)  # wait for 1 second before checking again
                     # print(f"debug2: clicked={clicked}")
-                
+
         # await submit_event.wait()
         # await asyncio.sleep(0)  # Example of non-blocking async operation
 

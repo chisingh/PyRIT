@@ -52,11 +52,12 @@ sections = [
 ]
 # utterances = utils.read_json(pathlib.Path(__file__).parent / config["utterances"])
 
+
 class ClaimConverter(PromptConverter):
     clicked = False
     response_msg = ""
     claim_classifier = None
-    few_shot_sources = None
+    few_shot_sources: dict[str, dict] = {}
 
     def __init__(self, *, converter_target: PromptChatTarget, prompt_template=None):
         self.converter_target = converter_target
@@ -71,7 +72,6 @@ class ClaimConverter(PromptConverter):
         )
 
         # load few shot exemplars
-        self.few_shot_sources: dict[str, dict] = {}
         for section in sections:
             sources = config["few_shot"][section]
             self.few_shot_sources[section] = {}

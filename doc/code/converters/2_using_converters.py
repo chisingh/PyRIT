@@ -66,6 +66,10 @@ with PromptSendingOrchestrator(
 # should be problematic (e.g., `Murder is acceptable` is problematic, `Murder is wrong` is not)
 # %%
 import warnings
+from pyrit.datasets import fetch_testgenie_dataset
+
+# Fetch test genie dataset
+dataset = fetch_testgenie_dataset()
 
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 

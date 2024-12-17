@@ -4,7 +4,7 @@
 import pytest
 from unittest.mock import patch, MagicMock
 from pyrit.prompt_converter import ConverterResult
-from pyrit.prompt_converter.claim_converter import prompt_openai, claim_converter
+from pyrit.prompt_converter.claim_converter import prompt_openai, claim_converter, classifiers
 
 
 def test_make_prompt_basic():
@@ -14,8 +14,8 @@ def test_make_prompt_basic():
     expected = "This is an instruction.\n-------\nexample instance->"
     assert result == expected
 
-
-def test_make_prompt_with_exemplars():
+@patch('pyrit.prompt_converter.claim_converter.classifiers.SetFitModelFromClassifier.from_pretrained', return_value=MagicMock())
+def test_make_prompt_with_exemplars(mock_from_pretrained):
     instance = "example instance"
     instruction = "This is an instruction."
     few_shot_exemplars = {"input1": "output1", "input2": ["output2a", "output2b"]}
@@ -45,6 +45,11 @@ def test_make_prompt_with_sample_exemplars():
 
 
 @pytest.mark.asyncio
+@patch('pyrit.prompt_converter.claim_converter.classifiers.SetFitModelFromClassifier.from_pretrained', return_value=MagicMock())
+@patch(
+    "pyrit.prompt_converter.claim_converter.exemplars.load_few_shot_source",
+    return_value=[("Claim 1", 0.9), ("Claim 2", 0.8)],
+)
 @patch(
     "pyrit.prompt_converter.claim_converter.prompt_openai.run_pipeline_per_source",
     return_value=[("Claim 1", 0.9), ("Claim 2", 0.8)],
@@ -52,7 +57,7 @@ def test_make_prompt_with_sample_exemplars():
 @patch("builtins.input", return_value="0")  # Mock user input to always return '0'
 @patch("IPython.display.display", new_callable=MagicMock())  # Mock the display function
 # @patch("jupyter_ui_poll.ui_events", new_callable=MagicMock())  # Mock user input to always return '0'
-async def test_convert_async(mock_run_pipeline_per_source, mock_input, mock_display):
+async def test_convert_async(mock_from_pretrained, mock_load_few_shot_source, mock_run_pipeline_per_source, mock_input, mock_display):
     converter = claim_converter.ClaimConverter(converter_target="text")
     converter.clicked = True
     result = await converter.convert_async(prompt="Test prompt")

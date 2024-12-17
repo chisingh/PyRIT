@@ -39,7 +39,7 @@ logger.setLevel(logging.DEBUG)
 config_path = pathlib.Path(__file__).parent / "_default.yaml"
 config = conf.load_config(config_path)
 
-testgenie_dataset = fetch_testgenie_dataset()
+# testgenie_dataset = fetch_testgenie_dataset()
 
 # Define an asyncio event
 checkbox_event = asyncio.Event()
@@ -49,21 +49,12 @@ submit_event = asyncio.Event()
 
 clf_config = config["classifier"]
 
-claim_classifier = components.load_classifier(
-    classifier_type=clf_config["type"],
-    classifier_encoder_model=clf_config["encoder_model"],
-    use_differentiable_head=clf_config["setfit"]["use_differentiable_head"],
-    num_iterations=clf_config["setfit"]["num_iterations"],
-    body_learning_rate=clf_config["setfit"]["body_learning_rate"],
-    batch_size=clf_config["setfit"]["batch_size"],
-)
-
 sections = [
     "utterances_to_claims",
     "claims_to_inferences",
     "inferences_to_generations",
 ]
-utterances = utils.read_json(pathlib.Path(__file__).parent / config["utterances"])
+# utterances = utils.read_json(pathlib.Path(__file__).parent / config["utterances"])
 # load few shot exemplars
 few_shot_sources: dict[str, dict] = {}
 for section in sections:
@@ -87,9 +78,18 @@ for section in sections:
 class ClaimConverter(PromptConverter):
     clicked = False
     response_msg = ""
-
+    claim_classifier = None
     def __init__(self, *, converter_target: PromptChatTarget, prompt_template=None):
         self.converter_target = converter_target
+
+        self.claim_classifier = components.load_classifier(
+            classifier_type=clf_config["type"],
+            classifier_encoder_model=clf_config["encoder_model"],
+            use_differentiable_head=clf_config["setfit"]["use_differentiable_head"],
+            num_iterations=clf_config["setfit"]["num_iterations"],
+            body_learning_rate=clf_config["setfit"]["body_learning_rate"],
+            batch_size=clf_config["setfit"]["batch_size"],
+        )
 
         # set to default strategy if not provided
         # prompt_template = (
@@ -296,7 +296,7 @@ class ClaimConverter(PromptConverter):
             verified_df = pd.DataFrame(sampled_df)
             generations_labeled = pd.concat([verified_df, unsampled_df]).sort_index()
             with output_area:
-                generations_estimated = classifiers.fit_and_predict(claim_classifier, generations_labeled, True)
+                generations_estimated = classifiers.fit_and_predict(self.claim_classifier, generations_labeled, True)
             # print(f"Generation estimated: {generations_estimated}")
             generations_estimated = generations_estimated.loc[generations_estimated.pred == 1]
 
@@ -345,7 +345,7 @@ class ClaimConverter(PromptConverter):
             # completion_df["label"][0] = True
             # completion_df["label"][1] = False
             with output_area:
-                completions_estimated = classifiers.fit_and_predict(claim_classifier, completion_df, do_fit=False)
+                completions_estimated = classifiers.fit_and_predict(self.claim_classifier, completion_df, do_fit=False)
 
             # calculate margin from random (closer to 0.5->more uncertain)
             completions_estimated["uncertainty"] = 1 - np.abs(0.5 - completions_estimated["prob"]) * 2

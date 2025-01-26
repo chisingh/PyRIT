@@ -33,7 +33,7 @@ classifier:
   # arguments specific to setfit; most meaningful ones included here
   setfit:
     use_differentiable_head:  false # setting to true increases train time
-    num_iterations:  10 # Can sometimes achieve better results with 20; 40 often overkill
+    num_iterations:  1 # Can sometimes achieve better results with 20; 40 often overkill
     body_learning_rate:  1.e-5 # 2e-5 and 2e-6 also viable
     batch_size:  20 # Will be smaller if entire training set fits in batch
 

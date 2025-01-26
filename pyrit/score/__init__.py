@@ -16,6 +16,7 @@ from pyrit.score.self_ask_true_false_scorer import SelfAskTrueFalseScorer, TrueF
 from pyrit.score.substring_scorer import SubStringScorer
 from pyrit.score.true_false_inverter_scorer import TrueFalseInverterScorer
 from pyrit.score.self_ask_refusal_scorer import SelfAskRefusalScorer
+from pyrit.score.claim_scorer import ClaimScorer
 
 
 __all__ = [
@@ -38,4 +39,5 @@ __all__ = [
     "TrueFalseInverterScorer",
     "TrueFalseQuestion",
     "TrueFalseQuestionPaths",
+    "ClaimScorer",
 ]

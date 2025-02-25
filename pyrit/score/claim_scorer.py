@@ -12,42 +12,16 @@ from pyrit.models import PromptRequestPiece, Score, SeedPrompt, UnvalidatedScore
 from pyrit.prompt_target import PromptChatTarget
 from pyrit.score.scorer import Scorer
 
-
-class LikertScalePaths(enum.Enum):
-    CYBER_SCALE = Path(LIKERT_SCALES_PATH, "cyber.yaml").resolve()
-    FAIRNESS_BIAS_SCALE = Path(LIKERT_SCALES_PATH, "fairness_bias.yaml").resolve()
-    HARM_SCALE = Path(LIKERT_SCALES_PATH, "harm.yaml").resolve()
-    HATE_SPEECH_SCALE = Path(LIKERT_SCALES_PATH, "hate_speech.yaml").resolve()
-    MISINFORMATION_SCALE = Path(LIKERT_SCALES_PATH, "misinformation.yaml").resolve()
-    PERSUASION_SCALE = Path(LIKERT_SCALES_PATH, "persuasion.yaml").resolve()
-    PHISHING_SCALE = Path(LIKERT_SCALES_PATH, "phishing.yaml").resolve()
-    SEXUAL_SCALE = Path(LIKERT_SCALES_PATH, "sexual.yaml").resolve()
-    VIOLENCE_SCALE = Path(LIKERT_SCALES_PATH, "violence.yaml").resolve()
-    DECEPTION_SCALE = Path(LIKERT_SCALES_PATH, "deception.yaml").resolve()
-
-
 class ClaimScorer(Scorer):
     """
     A class that represents a "self-ask" score for text scoring for a likert scale.
     """
 
-    def __init__(self, chat_target: PromptChatTarget, likert_scale_path: Path) -> None:
+    def __init__(self, chat_target: PromptChatTarget) -> None:
         self._prompt_target = chat_target
-        self.scorer_type = "float_scale"
+        self.scorer_type = "true_false"
 
-        likert_scale = yaml.safe_load(likert_scale_path.read_text(encoding="utf-8"))
-
-        if likert_scale["category"]:
-            self._score_category = likert_scale["category"]
-        else:
-            raise ValueError(f"Improperly formatted likert scale yaml file. Missing category in {likert_scale_path}.")
-
-        likert_scale = self._likert_scale_description_to_string(likert_scale["scale_descriptions"])
-
-        scoring_instructions_template = SeedPrompt.from_yaml_file(LIKERT_SCALES_PATH / "likert_system_prompt.yaml")
-        self._system_prompt = scoring_instructions_template.render_template_value(
-            likert_scale=likert_scale, category=self._score_category
-        )
+        self._system_prompt = "Is this statement true or false?" # TODO
 
     def _likert_scale_description_to_string(self, descriptions: list[Dict[str, str]]) -> str:
         """
@@ -93,21 +67,32 @@ class ClaimScorer(Scorer):
         """
         self.validate(request_response, task=task)
 
-        unvalidated_score: UnvalidatedScore = await self._score_value_with_llm(
-            prompt_target=self._prompt_target,
-            system_prompt=self._system_prompt,
-            prompt_request_value=request_response.converted_value,
-            prompt_request_data_type=request_response.converted_value_data_type,
-            scored_prompt_id=request_response.id,
-            category=self._score_category,
+        # unvalidated_score: UnvalidatedScore = await self._score_value_with_llm(
+        #     prompt_target=self._prompt_target,
+        #     system_prompt=self._system_prompt,
+        #     prompt_request_value=request_response.converted_value,
+        #     prompt_request_data_type=request_response.converted_value_data_type,
+        #     scored_prompt_id=request_response.id,
+        #     category=self._score_category,
+        #     task=task,
+        # )
+
+        unvalidated_score: UnvalidatedScore = UnvalidatedScore(
+            raw_score_value=True,
+            score_value_description="Description",  # Replace with actual description
+            score_type="true_false",  # Replace with actual type
+            score_category="Category",  # Replace with actual category
+            score_rationale="Rationale",  # Replace with actual rationale
+            score_metadata="{}",  # Replace with actual metadata
+            scorer_class_identifier="Identifier",  # Replace with actual identifier
+            prompt_request_response_id=request_response.id,
             task=task,
         )
-
         score = unvalidated_score.to_score(
-            score_value=str(self.scale_value_float(float(unvalidated_score.raw_score_value), 1, 5)),
+            score_value=unvalidated_score.raw_score_value,
         )
 
-        score.score_metadata = str({"likert_value": str(unvalidated_score.raw_score_value)})
+        score.score_metadata = str({"value": str(unvalidated_score.raw_score_value)})
 
         self._memory.add_scores_to_memory(scores=[score])
         return [score]

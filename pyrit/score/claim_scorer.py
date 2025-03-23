@@ -4,6 +4,8 @@
 import yaml
 import enum
 
+import pandas as pd
+
 from pathlib import Path
 from typing import Dict, Optional
 
@@ -11,6 +13,10 @@ from pyrit.common.path import LIKERT_SCALES_PATH
 from pyrit.models import PromptRequestPiece, Score, SeedPrompt, UnvalidatedScore
 from pyrit.prompt_target import PromptChatTarget
 from pyrit.score.scorer import Scorer
+
+
+from pyrit.prompt_converter.claim_converter import classifiers
+from pyrit.prompt_converter.claim_converter.components import session_state
 
 class ClaimScorer(Scorer):
     """
@@ -66,6 +72,21 @@ class ClaimScorer(Scorer):
                          The score_value is a value from [0,1] that is scaled from the likert scale.
         """
         self.validate(request_response, task=task)
+        print("----------------------------------------")
+        inst_value = request_response.converted_value
+        data = {
+            "claim": ["example_claim1", "example_claim2", "example_claim3"],
+            "inst": [inst_value, inst_value, inst_value],
+            "label": [1, 0, 1]
+        }
+
+        # Convert the dictionary to a DataFrame
+        completion_df = pd.DataFrame(data)
+
+        self.claim_classifier = session_state["claim_classifier"];
+        completions_estimated = classifiers.fit_and_predict(self.claim_classifier, completion_df, do_fit=False)
+        print("++++++++++++++++++++++++++++++++++++++++++++")
+        print(completions_estimated)
 
         # unvalidated_score: UnvalidatedScore = await self._score_value_with_llm(
         #     prompt_target=self._prompt_target,
@@ -84,7 +105,7 @@ class ClaimScorer(Scorer):
             score_category="Category",  # Replace with actual category
             score_rationale="Rationale",  # Replace with actual rationale
             score_metadata="{}",  # Replace with actual metadata
-            scorer_class_identifier="Identifier",  # Replace with actual identifier
+            scorer_class_identifier=None,  # Replace with actual identifier
             prompt_request_response_id=request_response.id,
             task=task,
         )

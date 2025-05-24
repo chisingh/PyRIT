@@ -174,7 +174,7 @@ class ClaimConverter(PromptConverter):
         #     value=initial_claim,
         #     on_change=_reset_to_step(CURRENT_STEP),
         # )
-        initial_claim = produced_claims[0][0] # produced_claims[int(selected)][0]
+        initial_claim = produced_claims[0][0]  # produced_claims[int(selected)][0]
 
         ########################
         # Claims to inferences
@@ -228,7 +228,7 @@ class ClaimConverter(PromptConverter):
         # )
         # inferences_selected = inferences_selected.split("\n")
 
-        inferences_selected = inferences[0] #int(selected)]
+        inferences_selected = inferences[0]  # int(selected)]
         # inf_to_gen_cfg = config["interface"]["inferences_to_generations"]
 
         generations = []

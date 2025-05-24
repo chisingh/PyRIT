@@ -34,6 +34,7 @@ sections = [
 
 logger = logging.getLogger(__name__)
 
+
 def make_prompt(
     instance: str,
     instruction: str,
@@ -55,6 +56,7 @@ def make_prompt(
     `sample_suffixes`: number of outputs to sample
     """
     import random
+
     prompt = ""
     random.seed(seed)
 
@@ -68,7 +70,7 @@ def make_prompt(
 
         random.shuffle(few_shot_exemplars_list)
         n = sample_exemplars or 1e10
-        exemplar_strings = []
+        exemplar_strings: list[str] = []
         for input_val, outputs in few_shot_exemplars_list:
             if input_val == instance:
                 continue
@@ -92,6 +94,7 @@ def make_prompt(
     if instance:
         prompt += instance + ("->" * ("->" not in instance))
     return prompt
+
 
 class TestGenieOrchestrator(Orchestrator):
     """
@@ -129,14 +132,17 @@ class TestGenieOrchestrator(Orchestrator):
         self._prepended_conversation: list[PromptRequestResponse] = None
 
         # Load few_shot_sources as in ClaimConverter
-        self.few_shot_sources = {}
+        self.few_shot_sources: dict[str, dict] = {}
         for section in sections:
             self.few_shot_sources[section] = {}
             sources = config["few_shot"][section]
             for source in sources:
                 data = exemplars.load_few_shot_source(
                     source=source,
-                    few_shot_dir=pathlib.Path(__file__).parent.parent / "prompt_converter" / "claim_converter" / config["few_shot"]["data_dir"],
+                    few_shot_dir=pathlib.Path(__file__).parent.parent
+                    / "prompt_converter"
+                    / "claim_converter"
+                    / config["few_shot"]["data_dir"],
                     max_n=500,
                     premise_first=section != "inferences_to_generations",
                     max_hypothesis_toks=6,
@@ -194,7 +200,7 @@ class TestGenieOrchestrator(Orchestrator):
                 )
                 prompts.append(prompt_str)
         return await self.send_prompts_async(prompt_list=prompts)
-    
+
     async def send_prompts_async(
         self,
         *,

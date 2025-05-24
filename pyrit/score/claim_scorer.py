@@ -18,6 +18,7 @@ from pyrit.score.scorer import Scorer
 from pyrit.prompt_converter.claim_converter import classifiers
 from pyrit.prompt_converter.claim_converter.components import session_state
 
+
 class ClaimScorer(Scorer):
     """
     A class that represents a "self-ask" score for text scoring for a likert scale.
@@ -27,7 +28,7 @@ class ClaimScorer(Scorer):
         self._prompt_target = chat_target
         self.scorer_type = "true_false"
 
-        self._system_prompt = "Is this statement true or false?" # TODO
+        self._system_prompt = "Is this statement true or false?"  # TODO
 
     def _likert_scale_description_to_string(self, descriptions: list[Dict[str, str]]) -> str:
         """
@@ -77,13 +78,13 @@ class ClaimScorer(Scorer):
         data = {
             "claim": ["example_claim1", "example_claim2", "example_claim3"],
             "inst": [inst_value, inst_value, inst_value],
-            "label": [1, 0, 1]
+            "label": [1, 0, 1],
         }
 
         # Convert the dictionary to a DataFrame
         completion_df = pd.DataFrame(data)
 
-        self.claim_classifier = session_state["claim_classifier"];
+        self.claim_classifier = session_state["claim_classifier"]
         completions_estimated = classifiers.fit_and_predict(self.claim_classifier, completion_df, do_fit=False)
         print("++++++++++++++++++++++++++++++++++++++++++++")
         print(completions_estimated)
@@ -99,7 +100,7 @@ class ClaimScorer(Scorer):
         # )
 
         unvalidated_score: UnvalidatedScore = UnvalidatedScore(
-            raw_score_value=True,
+            raw_score_value="True",
             score_value_description="Description",  # Replace with actual description
             score_type="true_false",  # Replace with actual type
             score_category="Category",  # Replace with actual category

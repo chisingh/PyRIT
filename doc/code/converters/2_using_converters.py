@@ -66,6 +66,7 @@ with PromptSendingOrchestrator(
 # should be problematic (e.g., `Murder is acceptable` is problematic, `Murder is wrong` is not)
 # %%
 import sys
+
 package_path = "/workspaces/PyRIT"
 if package_path not in sys.path:
     sys.path.append(package_path)
@@ -110,10 +111,9 @@ prompt_variation_converter = VariationConverter(converter_target=converter_targe
 # acf = AzureContentFilterScorer(harm_categories=[TextCategory.HATE])  # Options: HATE, SELF_HARM, SEXUAL, VIOLENCE
 
 # target = TextTarget()
-target = converter_target
 
 # scorer = SelfAskLikertScorer(likert_scale_path=LikertScalePaths.FAIRNESS_BIAS_SCALE.value, chat_target=target)
-scorer = ClaimScorer(likert_scale_path=LikertScalePaths.FAIRNESS_BIAS_SCALE.value, chat_target=target)
+scorer = ClaimScorer(chat_target=converter_target)
 
 # with PromptSendingOrchestrator(prompt_target=target, prompt_converters=[StringJoinConverter()], scorers=[]) as orchestrator:
 with PromptSendingOrchestrator(prompt_target=target, prompt_converters=[prompt_claim_converter]) as orchestrator:
@@ -135,7 +135,7 @@ with ScoringOrchestrator() as scoring_orchestrator:
     scores = await scoring_orchestrator.score_prompts_by_orchestrator_id_async(  # type: ignore
         scorer=scorer, orchestrator_ids=[id], responses_only=False
     )
-    
+
     for score in scores:
         prompt_text = memory.get_prompt_request_pieces_by_id(prompt_ids=[str(score.prompt_request_response_id)])[
             0

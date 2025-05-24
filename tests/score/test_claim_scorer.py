@@ -86,4 +86,4 @@ async def test_claim_scorer_score(memory: MemoryInterface, scorer_claim_response
 
         assert len(score) == 1
 
-        assert score[0].score_value == True
+        assert score[0].score_value == "True"

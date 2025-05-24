@@ -18,6 +18,10 @@ from pyrit.memory import CentralMemory, MemoryInterface
 from tests.mocks import MockPromptTarget
 from tests.mocks import get_memory_interface
 
+from pyrit.datasets import fetch_testgenie_dataset
+
+# Fetch test genie dataset
+dataset = fetch_testgenie_dataset()
 
 @pytest.fixture
 def memory_interface() -> Generator[MemoryInterface, None, None]:

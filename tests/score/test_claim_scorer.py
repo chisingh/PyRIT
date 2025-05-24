@@ -1,14 +1,11 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-import os
-
 from textwrap import dedent
 from typing import Generator
 from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
-from pyrit.exceptions.exception_classes import InvalidJsonException
 from pyrit.memory import CentralMemory
 from pyrit.memory.memory_interface import MemoryInterface
 from pyrit.models import PromptRequestPiece
@@ -56,7 +53,7 @@ async def test_claim_scorer_set_system_prompt(scorer_claim_response: PromptReque
 
         # chat_target.set_system_prompt.assert_called_once()
 
-        assert scorer.scorer_type is "true_false"
+        assert scorer.scorer_type == "true_false"
 
 
 @pytest.mark.asyncio

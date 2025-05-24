@@ -1,16 +1,11 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT license.
 
-import yaml
-import enum
-
 import pandas as pd
 
-from pathlib import Path
 from typing import Dict, Optional
 
-from pyrit.common.path import LIKERT_SCALES_PATH
-from pyrit.models import PromptRequestPiece, Score, SeedPrompt, UnvalidatedScore
+from pyrit.models import PromptRequestPiece, Score, UnvalidatedScore
 from pyrit.prompt_target import PromptChatTarget
 from pyrit.score.scorer import Scorer
 

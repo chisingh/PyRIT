@@ -44,7 +44,7 @@ def test_tts_initializes(tts_target: OpenAITTSTarget):
 
 def test_tts_initializes_calls_get_required_parameters(memory_interface: MemoryInterface):
     with patch.object(CentralMemory, "get_memory_instance", return_value=memory_interface):
-        with patch("pyrit.common.default_values.get_required_value") as mock_get_required:
+        with patch("pyrit.common.default_values.get_required_value", return_value="mock_value") as mock_get_required:
             target = OpenAITTSTarget(
                 deployment_name="deploymenttest",
                 endpoint="endpointtest",

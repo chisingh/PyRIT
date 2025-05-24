@@ -19,9 +19,79 @@ from pyrit.prompt_target import PromptTarget
 from pyrit.prompt_converter import PromptConverter
 from pyrit.score import Scorer
 
+# Imports and config for few_shot_sources loading
+import pathlib
+from pyrit.prompt_converter.claim_converter import config as conf, exemplars
+
+config_path = pathlib.Path(__file__).parent.parent / "prompt_converter" / "claim_converter" / "_default.yaml"
+config = conf.load_config(str(config_path))
+
+sections = [
+    "utterances_to_claims",
+    "claims_to_inferences",
+    "inferences_to_generations",
+]
 
 logger = logging.getLogger(__name__)
 
+def make_prompt(
+    instance: str,
+    instruction: str,
+    few_shot_exemplars: Optional[dict] = None,
+    one_output_per_exemplar: bool = False,
+    sample_exemplars: Optional[int] = None,
+    sample_suffixes: Optional[int] = None,
+    seed=None,
+) -> str:
+    """
+    Make a randomized prompt from instructions and few shot exemplars
+
+    `instance`: the example we are doing inference for
+    `instruction`: a natural language instruction that appears before the exemplars
+    `few_shot_exemplars`: a dictionary of input-output exemplars
+    `one_output_per_exemplar`: if multiple outputs are provided per input as a list, then
+        inputs will be repeated for each output, else, concatenated with "|"
+    `subsample_exemplars`: number of few-shot exemplars to sample
+    `sample_suffixes`: number of outputs to sample
+    """
+    import random
+    prompt = ""
+    random.seed(seed)
+
+    if instruction:
+        prompt += f"{instruction}\n-------\n"
+    if few_shot_exemplars is not None:
+        if isinstance(few_shot_exemplars, dict):
+            few_shot_exemplars_list = list(few_shot_exemplars.items())
+        else:
+            few_shot_exemplars_list = few_shot_exemplars
+
+        random.shuffle(few_shot_exemplars_list)
+        n = sample_exemplars or 1e10
+        exemplar_strings = []
+        for input_val, outputs in few_shot_exemplars_list:
+            if input_val == instance:
+                continue
+
+            if isinstance(outputs, (list, tuple)):
+                if sample_suffixes is None:
+                    k = len(outputs)
+                else:
+                    k = min(sample_suffixes, len(outputs))
+
+                sampled_outputs = random.sample(outputs, k)
+                if not one_output_per_exemplar:
+                    sampled_outputs = [" | ".join(sampled_outputs)]
+            else:
+                sampled_outputs = [outputs]
+
+            exemplar_strings.extend(f"{input_val}->{output}".replace("\n", " ") for output in sampled_outputs)
+            if len(exemplar_strings) >= n:
+                break
+        prompt += "\n".join(exemplar_strings) + "\n"
+    if instance:
+        prompt += instance + ("->" * ("->" not in instance))
+    return prompt
 
 class TestGenieOrchestrator(Orchestrator):
     """
@@ -58,12 +128,73 @@ class TestGenieOrchestrator(Orchestrator):
         self._batch_size = batch_size
         self._prepended_conversation: list[PromptRequestResponse] = None
 
+        # Load few_shot_sources as in ClaimConverter
+        self.few_shot_sources = {}
+        for section in sections:
+            self.few_shot_sources[section] = {}
+            sources = config["few_shot"][section]
+            for source in sources:
+                data = exemplars.load_few_shot_source(
+                    source=source,
+                    few_shot_dir=pathlib.Path(__file__).parent.parent / "prompt_converter" / "claim_converter" / config["few_shot"]["data_dir"],
+                    max_n=500,
+                    premise_first=section != "inferences_to_generations",
+                    max_hypothesis_toks=6,
+                    max_sent_toks=50,
+                )
+                if data is not None:
+                    self.few_shot_sources[section][source] = data
+
     def set_prepended_conversation(self, *, prepended_conversation: list[PromptRequestResponse]):
         """
         Prepends a conversation to the prompt target.
         """
         self._prepended_conversation = prepended_conversation
 
+    async def utterance_to_claims(
+        self,
+        instance: str,
+        few_shot_sources,
+        n_high: int = 1,
+        default_instruction=None,
+        exemplars_per_prompt=8,
+        outputs_per_exemplar=4,
+        one_output_per_exemplar=False,
+        seed=None,
+    ):
+        """
+        Generate prompts for a given instance using few_shot_sources and send them to the prompt target.
+
+        Args:
+            instance (str): The example for inference.
+            few_shot_sources (dict): Few-shot sources with instructions and exemplars.
+            n_high (int): Number of prompt generations per source.
+            default_instruction (str, optional): Default instruction if not provided in source.
+            exemplars_per_prompt (int): Max exemplars in a prompt.
+            outputs_per_exemplar (int): Max outputs per input exemplar.
+            one_output_per_exemplar (bool): If True, one output per exemplar.
+
+        Returns:
+            List of PromptRequestResponse from the prompt target.
+        """
+        prompts = []
+        for few_shot_data in few_shot_sources.values():
+            instruction = few_shot_data.get("instruction", default_instruction)
+            few_shot_exemplars = few_shot_data["exemplars"]
+
+            for _ in range(n_high):
+                prompt_str = make_prompt(
+                    instance=instance,
+                    instruction=instruction,
+                    few_shot_exemplars=few_shot_exemplars,
+                    one_output_per_exemplar=one_output_per_exemplar,
+                    sample_exemplars=exemplars_per_prompt,
+                    sample_suffixes=outputs_per_exemplar,
+                    seed=seed,
+                )
+                prompts.append(prompt_str)
+        return await self.send_prompts_async(prompt_list=prompts)
+    
     async def send_prompts_async(
         self,
         *,

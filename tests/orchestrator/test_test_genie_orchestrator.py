@@ -360,3 +360,52 @@ def test_prepare_conversation_without_prepended_conversation(mock_central_memory
 
     assert not conversation_id
     memory_mock.add_request_response_to_memory.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_utterance_to_claims_generates_expected_prompts(mock_target: MockPromptTarget, mock_central_memory_instance):
+    orchestrator = TestGenieOrchestrator(prompt_target=mock_target)
+    # Minimal few_shot_sources for testing
+    few_shot_sources = {
+        "test_section": {
+            "instruction": "Test instruction",
+            "exemplars": {
+                "input1": ["output1", "output2"],
+                "input2": ["output3"]
+            }
+        }
+    }
+    instance = "input3"
+    n_high = 2
+
+    # Patch send_prompts_async to capture prompts
+    orchestrator.send_prompts_async = AsyncMock(return_value="mocked_response")
+
+    # Patch random.seed to ensure deterministic output
+    import random
+    random.seed(42)
+
+    result = await orchestrator.utterance_to_claims(
+        instance=instance,
+        few_shot_sources=few_shot_sources,
+        n_high=n_high,
+        default_instruction=None,
+        exemplars_per_prompt=1,
+        outputs_per_exemplar=1,
+        one_output_per_exemplar=False,
+        seed=42,
+    )
+
+    # Check that send_prompts_async was called with the expected prompts
+    assert orchestrator.send_prompts_async.called
+    called_args = orchestrator.send_prompts_async.call_args[1]["prompt_list"]
+    # Should generate n_high prompts
+    assert len(called_args) == n_high
+    # Each prompt should contain the instruction and the instance
+    for prompt in called_args:
+        assert "Test instruction" in prompt
+        assert "input3" in prompt
+        # Should contain one of the exemplars (since exemplars_per_prompt=1)
+        assert ("input1->" in prompt or "input2->" in prompt)
+    # The result should be the mocked return value
+    assert result == "mocked_response"

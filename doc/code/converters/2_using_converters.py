@@ -89,9 +89,7 @@ from pyrit.prompt_converter import StringJoinConverter, ClaimConverter, Variatio
 from pyrit.orchestrator import PromptSendingOrchestrator
 from pyrit.orchestrator import ScoringOrchestrator
 
-from pyrit.score import (
-    ClaimScorer
-)
+from pyrit.score import ClaimScorer
 from pyrit.memory import DuckDBMemory, CentralMemory
 from pyrit.score import ClaimScorer
 

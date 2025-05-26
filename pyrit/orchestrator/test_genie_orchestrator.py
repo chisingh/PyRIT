@@ -5,6 +5,7 @@ from collections import defaultdict
 import uuid
 from colorama import Fore, Style
 import logging
+import numpy as np
 
 from typing import Optional
 
@@ -34,6 +35,26 @@ sections = [
 
 logger = logging.getLogger(__name__)
 
+_OPENAI_MAX_PROMPTS = 20
+_OPENAI_MAX_SAMPLES = 10
+
+def target_n_to_prompt_n(
+    target_n,
+    n_few_shot_sources=1,
+    mean_outputs_per_exemplar=1,
+    expected_duplicate_prob=0.8,
+):
+    """
+    Helper function to infer the number of prompts you need to achieve the desired
+    number of generated outputs
+    """
+    target_n = target_n / n_few_shot_sources / mean_outputs_per_exemplar * (1 / expected_duplicate_prob)
+    sqrt_n = np.sqrt(target_n)
+    n_samples, n_prompts = max(1, int(np.floor(sqrt_n))), int(np.ceil(sqrt_n))
+    if n_samples > _OPENAI_MAX_SAMPLES:
+        n_samples = _OPENAI_MAX_SAMPLES
+        n_prompts = target_n // n_prompts
+    return n_samples, n_prompts
 
 def make_prompt(
     instance: str,
@@ -157,17 +178,19 @@ class TestGenieOrchestrator(Orchestrator):
         """
         self._prepended_conversation = prepended_conversation
 
-    async def utterance_to_claims(
-        self,
-        instance: str,
-        few_shot_sources,
-        n_high: int = 1,
-        default_instruction=None,
-        exemplars_per_prompt=8,
-        outputs_per_exemplar=4,
-        one_output_per_exemplar=False,
-        seed=None,
-    ):
+    def _prompts_by_source(self,
+                           instance,  # target instance
+                           few_shot_sources,
+                           default_instruction=None,
+                           target_n=None,
+                           exemplars_per_prompt=8,  # maximum exemplars in a prompt
+                           outputs_per_exemplar=4,  # maximum outputs mapped to a given input
+                           one_output_per_exemplar=False,
+                           top_p=0.95,
+                           temperature=1,
+                           stop="\n",
+                           engine="gpt-3.5-turbo-instruct",
+                           batch_size=_OPENAI_MAX_PROMPTS):
         """
         Generate prompts for a given instance using few_shot_sources and send them to the prompt target.
 
@@ -183,6 +206,18 @@ class TestGenieOrchestrator(Orchestrator):
         Returns:
             List of PromptRequestResponse from the prompt target.
         """
+        mean_outputs_per_exemplar = 1
+        if one_output_per_exemplar:
+            mean_outputs_per_exemplar = 1
+        else:
+            mean_outputs_per_exemplar = np.mean(
+                [
+                    min(outputs_per_exemplar, len(ex)) if isinstance(ex, (tuple, list)) else 1
+                    for few_shot_data in few_shot_sources.values()
+                    for ex in few_shot_data["exemplars"].values()
+                ]
+            )
+        n_low, n_high = target_n_to_prompt_n(target_n, len(few_shot_sources), int(mean_outputs_per_exemplar))
         prompts = []
         for few_shot_data in few_shot_sources.values():
             instruction = few_shot_data.get("instruction", default_instruction)
@@ -196,10 +231,18 @@ class TestGenieOrchestrator(Orchestrator):
                     one_output_per_exemplar=one_output_per_exemplar,
                     sample_exemplars=exemplars_per_prompt,
                     sample_suffixes=outputs_per_exemplar,
-                    seed=seed,
                 )
                 prompts.append(prompt_str)
-        return await self.send_prompts_async(prompt_list=prompts)
+        return prompts
+
+    def utterances_to_claims(self, prompt: str, few_shot_sources: dict[str, dict] = None):
+        return self._prompts_by_source(instance=prompt, target_n=20, few_shot_sources=few_shot_sources or self.few_shot_sources["utterances_to_claims"])
+
+    def claims_to_inferences(self, prompt: str, few_shot_sources: dict[str, dict] = None):
+        return self._prompts_by_source(instance=prompt, target_n=20, few_shot_sources=few_shot_sources or self.few_shot_sources["claims_to_inferences"])
+
+    def inferences_to_generations(self, prompt: str, few_shot_sources: dict[str, dict] = None):
+        return self._prompts_by_source(instance=prompt, target_n=20, few_shot_sources=few_shot_sources or self.few_shot_sources["inferences_to_generations"])
 
     async def send_prompts_async(
         self,

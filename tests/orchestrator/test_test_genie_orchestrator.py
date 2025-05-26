@@ -372,45 +372,66 @@ async def test_utterance_to_claims_generates_expected_prompts(
     mock_target: MockPromptTarget, mock_central_memory_instance
 ):
     orchestrator = TestGenieOrchestrator(prompt_target=mock_target)
-    # Minimal few_shot_sources for testing
     few_shot_sources = {
         "test_section": {
             "instruction": "Test instruction",
-            "exemplars": {"input1": ["output1", "output2"], "input2": ["output3"]},
+            "exemplars": {"input1": ["output1", "output2"], "input2": ["output2"]},
         }
     }
     instance = "input3"
-    n_high = 2
 
-    with patch.object(
-        orchestrator, "send_prompts_async", AsyncMock(return_value="mocked_response")
-    ) as mock_send_prompts_async:
-        # Patch random.seed to ensure deterministic output
-        import random
+    result = orchestrator.utterances_to_claims(
+        prompt=instance,
+        few_shot_sources=few_shot_sources,
+    )
 
-        random.seed(42)
+    for prompt in result:
+        assert "Test instruction" in prompt
+        assert "input3" in prompt
+        assert "input1->" in prompt or "input2->" in prompt
 
-        result = await orchestrator.utterance_to_claims(
-            instance=instance,
-            few_shot_sources=few_shot_sources,
-            n_high=n_high,
-            default_instruction=None,
-            exemplars_per_prompt=1,
-            outputs_per_exemplar=1,
-            one_output_per_exemplar=False,
-            seed=42,
-        )
+@pytest.mark.asyncio
+async def test_claims_to_inferences_generates_expected_prompts(
+    mock_target: MockPromptTarget, mock_central_memory_instance
+):
+    orchestrator = TestGenieOrchestrator(prompt_target=mock_target)
+    few_shot_sources = {
+        "test_section": {
+            "instruction": "Test instruction",
+            "exemplars": {"input1": ["output1", "output2"], "input2": ["output2"]},
+        }
+    }
+    instance = "input3"
 
-        # Check that send_prompts_async was called with the expected prompts
-        assert mock_send_prompts_async.called
-        called_args = mock_send_prompts_async.call_args[1]["prompt_list"]
-        # Should generate n_high prompts
-        assert len(called_args) == n_high
-        # Each prompt should contain the instruction and the instance
-        for prompt in called_args:
-            assert "Test instruction" in prompt
-            assert "input3" in prompt
-            # Should contain one of the exemplars (since exemplars_per_prompt=1)
-            assert "input1->" in prompt or "input2->" in prompt
-        # The result should be the mocked return value
-        assert result == "mocked_response"
+    result = orchestrator.claims_to_inferences(
+        prompt=instance,
+        few_shot_sources=few_shot_sources,
+    )
+
+    for prompt in result:
+        assert "Test instruction" in prompt
+        assert "input3" in prompt
+        assert "input1->" in prompt or "input2->" in prompt
+
+@pytest.mark.asyncio
+async def test_inferences_to_generations_generates_expected_prompts(
+    mock_target: MockPromptTarget, mock_central_memory_instance
+):
+    orchestrator = TestGenieOrchestrator(prompt_target=mock_target)
+    few_shot_sources = {
+        "test_section": {
+            "instruction": "Test instruction",
+            "exemplars": {"input1": ["output1", "output2"], "input2": ["output2"]},
+        }
+    }
+    instance = "input3"
+
+    result = orchestrator.inferences_to_generations(
+        prompt=instance,
+        few_shot_sources=few_shot_sources,
+    )
+
+    for prompt in result:
+        assert "Test instruction" in prompt
+        assert "input3" in prompt
+        assert "input1->" in prompt or "input2->" in prompt

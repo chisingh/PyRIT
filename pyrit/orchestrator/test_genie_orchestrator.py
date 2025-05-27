@@ -56,6 +56,23 @@ def target_n_to_prompt_n(
         n_prompts = target_n // n_prompts
     return n_samples, n_prompts
 
+def filter_results(results, split_output=True):
+    """
+    Remove duplicates and filter probable results a GPT-3 prompt
+    """
+    if split_output:
+        results = [(sent.strip(), logp) for out, logp in results for sent in out.split("|")]
+    r = sorted(results, key=lambda x: -x[1])
+    ret = []
+    in_ret = set()
+    for x in r:
+        text = x[0].rstrip(".").strip().lower()
+        if text in in_ret or not text:
+            continue
+        in_ret.add(text)
+        ret.append(x)
+    return ret
+
 def make_prompt(
     instance: str,
     instruction: str,
@@ -235,14 +252,23 @@ class TestGenieOrchestrator(Orchestrator):
                 prompts.append(prompt_str)
         return prompts
 
-    def utterances_to_claims(self, prompt: str, few_shot_sources: dict[str, dict] = None):
-        return self._prompts_by_source(instance=prompt, target_n=20, few_shot_sources=few_shot_sources or self.few_shot_sources["utterances_to_claims"])
+    async def utterances_to_claims(self, prompt: str, few_shot_sources: dict[str, dict] = None):
+        prompts_list = self._prompts_by_source(instance=prompt, target_n=20, few_shot_sources=few_shot_sources or self.few_shot_sources["utterances_to_claims"])
+        response = await self.send_prompts_async(prompt_list=prompts_list)
+        claims = [p.capitalize() for p in response]
+        return claims
 
-    def claims_to_inferences(self, prompt: str, few_shot_sources: dict[str, dict] = None):
-        return self._prompts_by_source(instance=prompt, target_n=20, few_shot_sources=few_shot_sources or self.few_shot_sources["claims_to_inferences"])
+    async def claims_to_inferences(self, prompt: str, few_shot_sources: dict[str, dict] = None):
+        prompts_list = self._prompts_by_source(instance=prompt, target_n=20, few_shot_sources=few_shot_sources or self.few_shot_sources["claims_to_inferences"])
+        response = await self.send_prompts_async(prompt_list=prompts_list)
+        inferences = [i.capitalize().rstrip(".") if i[0].islower() else i.rstrip(".") for i in response]
+        return inferences
 
-    def inferences_to_generations(self, prompt: str, few_shot_sources: dict[str, dict] = None):
-        return self._prompts_by_source(instance=prompt, target_n=20, few_shot_sources=few_shot_sources or self.few_shot_sources["inferences_to_generations"])
+    async def inferences_to_generations(self, prompt: str, few_shot_sources: dict[str, dict] = None):
+        prompts_list = self._prompts_by_source(instance=prompt, target_n=20, few_shot_sources=few_shot_sources or self.few_shot_sources["inferences_to_generations"])
+        response = await self.send_prompts_async(prompt_list=prompts_list)
+        generations = [g for g in response] # if "->" not in g[0] + g[1]]  # infrequent bug
+        return generations
 
     async def send_prompts_async(
         self,
@@ -251,7 +277,7 @@ class TestGenieOrchestrator(Orchestrator):
         prompt_type: PromptDataType = "text",
         memory_labels: Optional[dict[str, str]] = None,
         metadata: Optional[str] = None,
-    ) -> list[PromptRequestResponse]:
+    ) -> list[str]: #PromptRequestResponse]:
         """
         Sends the prompts to the prompt target.
 
@@ -282,10 +308,23 @@ class TestGenieOrchestrator(Orchestrator):
                 )
             )
 
-        return await self.send_normalizer_requests_async(
+        response = await self.send_normalizer_requests_async(
             prompt_request_list=requests,
             memory_labels=self._combine_with_global_memory_labels(memory_labels),
         )
+
+            # Extract (output, logp) tuples from response for filtering
+        results = []
+        for r in response:
+            # Assuming each PromptRequestResponse has a .converted_value and .logp or similar
+            # Adjust attribute names as needed for your data model
+            for piece in r.request_pieces:
+                output = getattr(piece, "converted_value", None)
+                logp = getattr(piece, "logp", 0.0)  # Default to 0.0 if not present
+                if output is not None:
+                    results.append((output, logp))
+
+        return [r for r, _ in filter_results(results, True)]
 
     async def send_normalizer_requests_async(
         self,

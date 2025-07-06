@@ -137,7 +137,14 @@ def make_prompt(
 class TestGenieOrchestrator(Orchestrator):
     """
     This orchestrator takes a set of prompts, converts them using the list of PromptConverters,
-    sends them to a target, and scores the resonses with scorers (if provided).
+    sends them to a target, and scores the responses with scorers (if provided).
+    
+    The orchestrator supports both programmatic and interactive workflows:
+    - Programmatic: Use the async methods (utterances_to_claims, claims_to_inferences, inferences_to_generations) directly
+    - Interactive: Use the interactive methods (*_interactive) for Jupyter notebook workflows with ipywidgets
+    
+    Interactive methods provide UI components for user input and step-by-step workflow management,
+    making it easy to experiment with the TestGenie pipeline in notebooks.
     """
 
     def __init__(
@@ -168,6 +175,9 @@ class TestGenieOrchestrator(Orchestrator):
 
         self._batch_size = batch_size
         self._prepended_conversation: list[PromptRequestResponse] = None
+
+        # Initialize workflow data for interactive methods
+        self.workflow_data = {}
 
         # Load few_shot_sources as in ClaimConverter
         self.few_shot_sources: dict[str, dict] = {}
@@ -201,7 +211,7 @@ class TestGenieOrchestrator(Orchestrator):
                            default_instruction=None,
                            target_n=None,
                            exemplars_per_prompt=8,  # maximum exemplars in a prompt
-                           outputs_per_exemplar=4,  # maximum outputs mapped to a given input
+                           outputs_per_exemplar=4,  # maximum outputs mapped to a given input exemplar
                            one_output_per_exemplar=False,
                            top_p=0.95,
                            temperature=1,
@@ -422,3 +432,425 @@ class TestGenieOrchestrator(Orchestrator):
 
                 self._memory.add_request_response_to_memory(request=request)
         return conversation_id
+
+    def _run_async_in_jupyter(self, coro):
+        """Helper method to run async coroutines in Jupyter notebooks"""
+        import asyncio
+        import threading
+        
+        try:
+            # Check if we're in a Jupyter environment with a running event loop
+            asyncio.get_running_loop()
+            
+            # We have a running event loop, run in a separate thread with new loop
+            result = [None]
+            exception = [None]
+            
+            def run_coro():
+                try:
+                    new_loop = asyncio.new_event_loop()
+                    asyncio.set_event_loop(new_loop)
+                    result[0] = new_loop.run_until_complete(coro)
+                    new_loop.close()
+                except Exception as e:
+                    exception[0] = e
+            
+            thread = threading.Thread(target=run_coro)
+            thread.start()
+            thread.join()
+            
+            if exception[0]:
+                raise exception[0]
+            return result[0]
+                
+        except RuntimeError:
+            # No running event loop, we can use asyncio.run normally
+            return asyncio.run(coro)
+
+    def extract_claims_interactive(self, utterance: str = ""):
+        """Interactive claims extraction with text input widget
+        
+        Args:
+            utterance: Optional utterance to process directly. If empty, shows UI for input.
+            
+        Returns:
+            List of extracted claims or None if using UI (results stored in workflow_data)
+        """
+        try:
+            import ipywidgets as widgets
+            from IPython.display import display, clear_output
+        except ImportError:
+            raise ImportError("ipywidgets and IPython are required for interactive functionality. "
+                            "Install with: pip install ipywidgets")
+        
+        # If utterance is provided, use it directly
+        if utterance:
+            self.workflow_data['utterance'] = utterance
+            print(f"🔍 Using provided utterance: {utterance}")
+            print("🔄 Extracting claims...")
+            
+            # Use actual orchestrator method to extract claims
+            try:
+                # Run the async claim extraction using helper method
+                claims = self._run_async_in_jupyter(self.utterances_to_claims(utterance))
+                
+                self.workflow_data['utterance'] = utterance
+                self.workflow_data['claims'] = claims
+                
+                print(f"✅ Extracted {len(claims)} claims:")
+                for i, claim in enumerate(claims, 1):
+                    print(f"   {i}. {claim}")
+                
+                print(f"\n📊 Found {len(claims)} testable claims")
+                print("\n➡️  Next: Run Step 2 to select a claim")
+                
+                return claims
+            except Exception as e:
+                print(f"❌ Error extracting claims: {str(e)}")
+                print("Please check your OpenAI configuration and try again.")
+                return []
+        
+        # Otherwise show UI for input
+        default_text = "He should stay inside. Since he has cancer, if he goes outside someone could get it."
+        
+        # Create input widget
+        utterance_input = widgets.Textarea(
+            value=default_text,
+            description='Utterance:',
+            style={'description_width': 'initial'},
+            layout=widgets.Layout(width='80%', height='100px')
+        )
+        
+        extract_button = widgets.Button(
+            description="Extract Claims",
+            button_style='primary',
+            icon='search'
+        )
+        
+        output_area = widgets.Output()
+        
+        # Create UI
+        ui = widgets.VBox([
+            widgets.HTML("<h4>Enter a problematic utterance to analyze:</h4>"),
+            utterance_input,
+            extract_button,
+            output_area
+        ])
+        
+        display(ui)
+        
+        # Setup button handler
+        def on_extract_clicked(b):
+            with output_area:
+                clear_output()
+                
+                utterance_text = utterance_input.value.strip()
+                if not utterance_text:
+                    print("❌ Please enter an utterance first!")
+                    return
+                
+                print(f"🔍 Analyzing utterance: {utterance_text}")
+                print("🔄 Extracting claims...")
+                
+                # Use actual orchestrator method to extract claims
+                try:
+                    # Run the async claim extraction using helper method
+                    claims = self._run_async_in_jupyter(self.utterances_to_claims(utterance_text))
+                    
+                    # Store results
+                    self.workflow_data['utterance'] = utterance_text
+                    self.workflow_data['claims'] = claims
+                    
+                    print(f"✅ Extracted {len(claims)} claims:")
+                    for i, claim in enumerate(claims, 1):
+                        print(f"   {i}. {claim}")
+                    
+                    print(f"\n📊 Found {len(claims)} testable claims")
+                    print("\n➡️  Next: Run Step 2 to select a claim")
+                except Exception as e:
+                    print(f"❌ Error extracting claims: {str(e)}")
+                    print("Please check your OpenAI configuration and try again.")
+                    # Clear any partial data
+                    self.workflow_data.pop('claims', None)
+        
+        extract_button.on_click(on_extract_clicked)
+        
+        print("👆 Click 'Extract Claims' button above to proceed")
+        return None  # UI-based, results will be stored in workflow_data
+
+    def select_claim_interactive(self):
+        """Interactive claim selection with dropdown widget
+        
+        Returns:
+            List of available claims or None if no claims available
+        """
+        try:
+            import ipywidgets as widgets
+            from IPython.display import display, clear_output
+        except ImportError:
+            raise ImportError("ipywidgets and IPython are required for interactive functionality.")
+        
+        claims = self.workflow_data.get('claims', [])
+        
+        if not claims:
+            print("❌ Please complete Step 1 (Extract Claims) first!")
+            return None
+        
+        # Create selection widget
+        claim_dropdown = widgets.Dropdown(
+            options=[(f"{i+1}. {claim[:60]}..." if len(claim) > 60 else f"{i+1}. {claim}", i) 
+                    for i, claim in enumerate(claims)],
+            description='Select Claim:',
+            style={'description_width': 'initial'},
+            layout=widgets.Layout(width='90%')
+        )
+        
+        confirm_button = widgets.Button(
+            description="Confirm Selection",
+            button_style='success',
+            icon='check'
+        )
+        
+        selection_output = widgets.Output()
+        
+        display(widgets.VBox([
+            widgets.HTML(f"<h4>Select a claim to work with ({len(claims)} available):</h4>"),
+            claim_dropdown,
+            confirm_button,
+            selection_output
+        ]))
+        
+        def on_confirm_clicked(b):
+            with selection_output:
+                clear_output()
+                
+                selected_claim_index = claim_dropdown.value
+                selected_claim = claims[selected_claim_index]
+                
+                # Store selection
+                self.workflow_data['selected_claim'] = selected_claim
+                self.workflow_data['selected_claim_index'] = selected_claim_index
+                
+                print(f"✅ Selected claim #{selected_claim_index + 1}:")
+                print(f"   {selected_claim}")
+                print("\n➡️  Next: Run Step 3 to generate inferences")
+        
+        confirm_button.on_click(on_confirm_clicked)
+        
+        print("👆 Select a claim and click 'Confirm Selection' above to proceed")
+        return claims
+
+    def generate_inferences_interactive(self, max_inferences: int = 3):
+        """Interactive inference generation with configuration options
+        
+        Args:
+            max_inferences: Default number of inferences to generate
+            
+        Returns:
+            None (results stored in workflow_data)
+        """
+        try:
+            import ipywidgets as widgets
+            from IPython.display import display, clear_output
+        except ImportError:
+            raise ImportError("ipywidgets and IPython are required for interactive functionality.")
+        
+        selected_claim = self.workflow_data.get('selected_claim')
+        if not selected_claim:
+            print("❌ Please complete Step 2 (Select Claim) first!")
+            return []
+        
+        # Create configuration widgets
+        inference_count = widgets.IntSlider(
+            value=max_inferences,
+            min=1,
+            max=10,
+            description='Count:',
+            style={'description_width': 'initial'}
+        )
+        
+        generate_button = widgets.Button(
+            description="Generate Inferences",
+            button_style='primary',
+            icon='cogs'
+        )
+        
+        output_area = widgets.Output()
+        
+        display(widgets.VBox([
+            widgets.HTML(f"<h4>Generate inferences for: <em>{selected_claim}</em></h4>"),
+            inference_count,
+            generate_button,
+            output_area
+        ]))
+        
+        def on_generate_clicked(b):
+            with output_area:
+                clear_output()
+                print("🔄 Generating inferences...")
+                
+                try:
+                    count = inference_count.value
+                    print(f"🧠 Generating up to {count} inferences...")
+                    
+                    # Use actual orchestrator method to generate inferences
+                    try:
+                        # Run the async inference generation using helper method
+                        all_inferences = self._run_async_in_jupyter(self.claims_to_inferences(selected_claim))
+                        
+                        # Limit to requested count
+                        inferences = all_inferences[:count] if count < len(all_inferences) else all_inferences
+                        
+                        # Store results
+                        self.workflow_data['inferences'] = inferences
+                        
+                        print(f"\n✅ Generated {len(inferences)} inferences:")
+                        for i, inference in enumerate(inferences, 1):
+                            print(f"   {i}. {inference}")
+                        
+                        print(f"\n📈 Generated {len(inferences)} inferences from 1 claim")
+                        print("\n➡️  Next: Run Step 4 to generate test prompts")
+                        
+                    except Exception as e:
+                        print(f"❌ Error generating inferences: {str(e)}")
+                        print("Please check your OpenAI configuration and try again.")
+                        # Clear any partial data
+                        self.workflow_data.pop('inferences', None)
+                    
+                except Exception as e:
+                    print(f"❌ Error generating inferences: {str(e)}")
+        
+        generate_button.on_click(on_generate_clicked)
+        
+        print("👆 Configure settings and click 'Generate Inferences' above to proceed")
+        return None
+
+    def generate_tests_interactive(self, tests_per_inference: int = 2):
+        """Interactive test generation with inference selection
+        
+        Args:
+            tests_per_inference: Default number of tests to generate per inference
+            
+        Returns:
+            None (results stored in workflow_data)
+        """
+        try:
+            import ipywidgets as widgets
+            from IPython.display import display, clear_output
+        except ImportError:
+            raise ImportError("ipywidgets and IPython are required for interactive functionality.")
+        
+        inferences = self.workflow_data.get('inferences', [])
+        if not inferences:
+            print("❌ Please complete Step 3 (Generate Inferences) first!")
+            return []
+        
+        # Create configuration widgets
+        inference_selector = widgets.SelectMultiple(
+            options=[(f"{i+1}. {inf[:50]}...", i) for i, inf in enumerate(inferences)],
+            value=list(range(len(inferences))),  # Select all by default
+            description='Inferences:',
+            style={'description_width': 'initial'},
+            layout=widgets.Layout(height='120px', width='90%')
+        )
+        
+        test_count_slider = widgets.IntSlider(
+            value=tests_per_inference,
+            min=1,
+            max=5,
+            description='Tests per inference:',
+            style={'description_width': 'initial'}
+        )
+        
+        generate_button = widgets.Button(
+            description="Generate Tests",
+            button_style='primary',
+            icon='flask'
+        )
+        
+        output_area = widgets.Output()
+        
+        display(widgets.VBox([
+            widgets.HTML("<h4>Select inferences to generate tests from:</h4>"),
+            inference_selector,
+            test_count_slider,
+            generate_button,
+            output_area
+        ]))
+        
+        def on_generate_clicked(b):
+            with output_area:
+                clear_output()
+                print("🔄 Generating test prompts...")
+                
+                try:
+                    selected_indices = list(inference_selector.value)
+                    selected_inferences = [inferences[i] for i in selected_indices]
+                    tests_count = test_count_slider.value
+                    
+                    print(f"🧪 Processing {len(selected_inferences)} inferences...")
+                    print(f"📊 Generating {tests_count} tests per inference...")
+                    
+                    all_tests = []
+                    
+                    # Use actual orchestrator method to generate tests
+                    for i, inference in enumerate(selected_inferences, 1):
+                        print(f"\n📝 Processing inference {i}/{len(selected_inferences)}...")
+                        
+                        try:
+                            # Run the async test generation for this inference using helper method
+                            inference_tests = self._run_async_in_jupyter(self.inferences_to_generations(inference))
+                            
+                            # Limit to requested count per inference
+                            limited_tests = inference_tests[:tests_count] if tests_count < len(inference_tests) else inference_tests
+                            all_tests.extend(limited_tests)
+                            
+                            print(f"   Generated {len(limited_tests)} tests")
+                            
+                        except Exception as e:
+                            print(f"   ❌ Error generating tests for inference {i}: {str(e)}")
+                            print("   Skipping this inference. Please check your OpenAI configuration.")
+                    
+                    # Store results
+                    self.workflow_data['selected_inferences'] = selected_inferences
+                    self.workflow_data['all_tests'] = all_tests
+                    self.workflow_data['tests_per_inference'] = tests_count
+                    
+                    print(f"\n✅ Generated {len(all_tests)} total test prompts!")
+                    
+                    # Show sample tests
+                    print("\n📋 Sample test prompts:")
+                    for i, test in enumerate(all_tests[:3], 1):
+                        preview = test[:100] + "..." if len(test) > 100 else test
+                        print(f"   {i}. {preview}")
+                    
+                    if len(all_tests) > 3:
+                        print(f"   ... and {len(all_tests) - 3} more tests")
+                    
+                    print("\n➡️  Next: Run Step 5 to review results")
+                    
+                except Exception as e:
+                    print(f"❌ Error generating tests: {str(e)}")
+        
+        generate_button.on_click(on_generate_clicked)
+        
+        print("👆 Configure settings and click 'Generate Tests' above to proceed")
+        return None
+
+    def get_workflow_summary(self):
+        """Get comprehensive workflow summary
+        
+        Returns:
+            Dictionary containing all workflow data including utterance, claims,
+            selected claim, inferences, and generated tests
+        """
+        return {
+            'utterance': self.workflow_data.get('utterance', ''),
+            'claims': self.workflow_data.get('claims', []),
+            'selected_claim': self.workflow_data.get('selected_claim', ''),
+            'selected_claim_index': self.workflow_data.get('selected_claim_index', 0),
+            'inferences': self.workflow_data.get('inferences', []),
+            'selected_inferences': self.workflow_data.get('selected_inferences', []),
+            'all_tests': self.workflow_data.get('all_tests', []),
+            'tests_per_inference': self.workflow_data.get('tests_per_inference', 0)
+        }

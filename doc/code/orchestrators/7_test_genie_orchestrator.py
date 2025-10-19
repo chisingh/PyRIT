@@ -48,8 +48,9 @@ import importlib
 
 # PyRIT imports
 from pyrit.memory import DuckDBMemory, CentralMemory
-from pyrit.prompt_target import OpenAICompletionTarget
+from pyrit.prompt_target import OpenAIChatTarget
 from pyrit.common import default_values
+from pyrit.datasets import fetch_testgenie_dataset
 
 # Reload the module to get the latest changes
 import pyrit.orchestrator.test_genie_orchestrator
@@ -60,8 +61,11 @@ from pyrit.orchestrator.test_genie_orchestrator import TestGenieOrchestrator
 default_values.load_environment_files()
 CentralMemory.set_memory_instance(DuckDBMemory())
 
+# Fetch test genie dataset
+dataset = fetch_testgenie_dataset()
+
 # Create enhanced orchestrator with UI capabilities
-target = OpenAICompletionTarget(is_azure_target=False)
+target = OpenAIChatTarget(is_azure_target=False)
 orchestrator = TestGenieOrchestrator(prompt_target=target)
 
 # Initialize workflow variables

@@ -6,6 +6,7 @@ import subprocess
 import requests
 import tarfile
 import zipfile
+import sys
 
 
 def check_command(command):
@@ -51,7 +52,7 @@ def main():
     check_command("unzip")
 
     try:
-        subprocess.run(["python", "-m", "spacy", "download", "en_core_web_sm"], check=True)
+        subprocess.run([sys.executable, "-m", "spacy", "download", "en_core_web_sm"], check=True)
     except subprocess.CalledProcessError as e:
         print(f"Failed to download spaCy model: {e}")
 
@@ -60,7 +61,7 @@ def main():
     download_file("https://maartensap.com/social-bias-frames/SBIC.v2.tgz", "sbf/SBIC.v2.tgz")
     extract_tar_gz("sbf/SBIC.v2.tgz", "sbf/")
     if not os.path.exists("sample_utterances.json"):
-        subprocess.run(["python", "gen_sample_utterances.py"], check=True)
+        subprocess.run([sys.executable, "gen_sample_utterances.py"], check=True)
     else:
         print("Sample utterances already generated. Skipping.")
 
@@ -85,7 +86,7 @@ def main():
 
     # Process data for few-shot
     if not os.path.exists("exemplars_processed.json"):
-        subprocess.run(["python", "exemplars.py"], check=True)
+        subprocess.run([sys.executable, "exemplars.py"], check=True)
     else:
         print("Exemplars already processed. Skipping.")
 

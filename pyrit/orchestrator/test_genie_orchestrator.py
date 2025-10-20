@@ -6,6 +6,7 @@ import uuid
 from colorama import Fore, Style
 import logging
 import numpy as np
+from datetime import datetime
 
 from typing import Optional
 
@@ -553,6 +554,193 @@ class TestGenieOrchestrator(Orchestrator):
                     continue
         
         return test_data
+
+    async def test_prompts_against_target(self, test_prompts: list[dict], target_model: PromptTarget = None, completions_per_prompt: int = 1) -> list[dict]:
+        """Test generated prompts against a target model
+        
+        Args:
+            test_prompts: List of test prompt dictionaries from create_test_prompts_from_generations
+            target_model: Optional target model (defaults to orchestrator's target)
+            completions_per_prompt: Number of completions to generate per prompt
+            
+        Returns:
+            List of test results with prompts, completions, and metadata
+        """
+        if target_model is None:
+            target_model = self._prompt_target
+        
+        test_results = []
+        
+        for i, prompt_data in enumerate(test_prompts):
+            prompt = prompt_data['prompt']
+            
+            try:
+                # Generate multiple completions for this prompt
+                completions = []
+                for completion_idx in range(completions_per_prompt):
+                    response = await self.send_prompts_async(
+                        prompt_list=[prompt], 
+                        metadata={
+                            "test_id": prompt_data['test_id'],
+                            "completion_index": completion_idx,
+                            "strategy": prompt_data['strategy'],
+                            "claim": prompt_data['claim']
+                        }
+                    )
+                    
+                    if response:
+                        completions.append(response[0])
+                    else:
+                        completions.append("[No response generated]")
+                
+                # Create test result
+                test_result = {
+                    **prompt_data,  # Include all original prompt data
+                    'completions': completions,
+                    'completions_count': len(completions),
+                    'test_status': 'completed',
+                    'test_timestamp': datetime.now().isoformat()
+                }
+                
+                test_results.append(test_result)
+                
+            except Exception as e:
+                # Handle errors gracefully
+                test_result = {
+                    **prompt_data,
+                    'completions': [f"[Error: {str(e)}]"],
+                    'completions_count': 0,
+                    'test_status': 'error',
+                    'error_message': str(e),
+                    'test_timestamp': datetime.now().isoformat()
+                }
+                test_results.append(test_result)
+        
+        return test_results
+
+    def test_prompts_interactive(self, completions_per_prompt: int = 2):
+        """Interactive interface for testing generated prompts against target models
+        
+        Args:
+            completions_per_prompt: Default number of completions per prompt
+            
+        Returns:
+            None (results stored in workflow_data)
+        """
+        try:
+            import ipywidgets as widgets
+            from IPython.display import display, clear_output
+        except ImportError:
+            raise ImportError("ipywidgets and IPython are required for interactive functionality.")
+        
+        test_prompts = self.workflow_data.get('test_prompts', [])
+        if not test_prompts:
+            print("❌ Please complete Step 4.5 (Create Test Prompts) first!")
+            return []
+        
+        # Create configuration widgets
+        completions_slider = widgets.IntSlider(
+            value=completions_per_prompt,
+            min=1,
+            max=5,
+            description='Completions per prompt:',
+            style={'description_width': 'initial'}
+        )
+        
+        # Sample selection for testing (to avoid overwhelming the API)
+        max_prompts = min(10, len(test_prompts))
+        prompt_count_slider = widgets.IntSlider(
+            value=max_prompts,
+            min=1,
+            max=len(test_prompts),
+            description='Prompts to test:',
+            style={'description_width': 'initial'}
+        )
+        
+        test_button = widgets.Button(
+            description="Test Target Model",
+            button_style='danger',  # Red for testing
+            icon='crosshairs'
+        )
+        
+        output_area = widgets.Output()
+        
+        display(widgets.VBox([
+            widgets.HTML(f"<h4>Test Target Model with Generated Prompts</h4>"),
+            widgets.HTML(f"<p>Ready to test {len(test_prompts)} prompts against your target model:</p>"),
+            widgets.HTML(f"<p><strong>Target:</strong> {type(self._prompt_target).__name__}</p>"),
+            prompt_count_slider,
+            completions_slider,
+            widgets.HTML("<p><strong>⚠️ Warning:</strong> This will send prompts to your target model and may incur API costs.</p>"),
+            test_button,
+            output_area
+        ]))
+        
+        def on_test_clicked(b):
+            with output_area:
+                clear_output()
+                print("🎯 Testing prompts against target model...")
+                
+                try:
+                    prompts_to_test = int(prompt_count_slider.value)
+                    completions_count = int(completions_slider.value)
+                    
+                    # Sample prompts for testing
+                    sampled_prompts = test_prompts[:prompts_to_test]
+                    
+                    print(f"🧪 Testing {len(sampled_prompts)} prompts...")
+                    print(f"📊 Generating {completions_count} completions per prompt...")
+                    print(f"🎯 Target: {type(self._prompt_target).__name__}")
+                    print("\n" + "="*50)
+                    
+                    # Run the async testing using helper method
+                    test_results = self._run_async_in_jupyter(
+                        self.test_prompts_against_target(sampled_prompts, completions_per_prompt=completions_count)
+                    )
+                    
+                    # Store results
+                    self.workflow_data['test_results'] = test_results
+                    self.workflow_data['target_model_type'] = type(self._prompt_target).__name__
+                    self.workflow_data['completions_per_prompt'] = completions_count
+                    
+                    # Analyze results
+                    total_completions = sum(len(result.get('completions', [])) for result in test_results)
+                    successful_tests = len([r for r in test_results if r.get('test_status') == 'completed'])
+                    failed_tests = len([r for r in test_results if r.get('test_status') == 'error'])
+                    
+                    print(f"\n✅ Testing completed!")
+                    print(f"📊 Results Summary:")
+                    print(f"   • Total prompts tested: {len(test_results)}")
+                    print(f"   • Successful tests: {successful_tests}")
+                    print(f"   • Failed tests: {failed_tests}")
+                    print(f"   • Total completions: {total_completions}")
+                    
+                    # Show sample results
+                    print(f"\n📋 Sample Test Results:")
+                    for i, result in enumerate(test_results[:3], 1):
+                        print(f"\n{i}. [{result['strategy']}] {result['prompt'][:60]}...")
+                        if result['test_status'] == 'completed':
+                            for j, completion in enumerate(result['completions'][:2], 1):
+                                preview = completion[:100] + "..." if len(completion) > 100 else completion
+                                print(f"   Completion {j}: {preview}")
+                        else:
+                            print(f"   ❌ Error: {result.get('error_message', 'Unknown error')}")
+                        print("-" * 60)
+                    
+                    if len(test_results) > 3:
+                        print(f"   ... and {len(test_results) - 3} more test results")
+                    
+                    print(f"\n🎯 All test results stored in workflow_data['test_results']")
+                    print("\n➡️  Next: Run Step 6 to review complete results with target model testing")
+                    
+                except Exception as e:
+                    print(f"❌ Error testing target model: {str(e)}")
+                    print("Please check your target model configuration and try again.")
+        
+        test_button.on_click(on_test_clicked)
+        
+        print("👆 Configure settings and click 'Test Target Model' above to proceed")
+        return None
 
     async def send_prompts_async(
         self,
@@ -1300,7 +1488,7 @@ class TestGenieOrchestrator(Orchestrator):
         
         Returns:
             Dictionary containing all workflow data including utterance, claims,
-            selected claim, inferences, generated tests, and configuration options
+            selected claim, inferences, generated tests, configuration options, and test results
         """
         return {
             'utterance': self.workflow_data.get('utterance', ''),
@@ -1315,5 +1503,8 @@ class TestGenieOrchestrator(Orchestrator):
             'all_tests': self.workflow_data.get('all_tests', []),
             'tests_per_inference': self.workflow_data.get('tests_per_inference', 0),
             'test_prompts': self.workflow_data.get('test_prompts', []),
-            'truncation_strategies': self.workflow_data.get('truncation_strategies', [])
+            'truncation_strategies': self.workflow_data.get('truncation_strategies', []),
+            'test_results': self.workflow_data.get('test_results', []),
+            'target_model_type': self.workflow_data.get('target_model_type', ''),
+            'completions_per_prompt': self.workflow_data.get('completions_per_prompt', 0)
         }

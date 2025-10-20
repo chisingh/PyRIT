@@ -268,17 +268,275 @@ class TestGenieOrchestrator(Orchestrator):
         claims = [p.capitalize() for p in response]
         return claims
 
-    async def claims_to_inferences(self, prompt: str, few_shot_sources: dict[str, dict] = None):
-        prompts_list = self._prompts_by_source(instance=prompt, target_n=20, few_shot_sources=few_shot_sources or self.few_shot_sources["claims_to_inferences"])
+    def _filter_inference_sources(self, inference_methods: list[str]) -> dict[str, dict]:
+        """Filter few-shot sources based on selected inference methods
+        
+        Args:
+            inference_methods: List of methods like ['pragmatic', 'entailment', 'paraphrase']
+            
+        Returns:
+            Filtered dictionary of few-shot sources
+        """
+        inference_sources = []
+        
+        if "pragmatic" in inference_methods:
+            inference_sources.extend([
+                "internal-claims_to_inferences", "internal-hyponym_inferences",
+                "imppres-implicature", "imppres-presupposition"
+            ])
+        if "entailment" in inference_methods:
+            inference_sources.extend(["entailmentbank"])
+        if "paraphrase" in inference_methods:
+            inference_sources.extend(["glue-mrpc", "glue-stsb"])
+        
+        # Filter available sources
+        filtered_sources = {
+            k: self.few_shot_sources["claims_to_inferences"][k] 
+            for k in inference_sources
+            if k in self.few_shot_sources["claims_to_inferences"]
+        }
+        
+        return filtered_sources
+
+    async def claims_to_inferences(self, prompt: str, few_shot_sources: dict[str, dict] = None, inference_methods: list[str] = None):
+        """Generate inferences from claims with optional method filtering
+        
+        Args:
+            prompt: The claim to generate inferences from
+            few_shot_sources: Optional custom few-shot sources
+            inference_methods: List of inference methods to use ['pragmatic', 'entailment', 'paraphrase']
+        """
+        if few_shot_sources is None:
+            if inference_methods:
+                few_shot_sources = self._filter_inference_sources(inference_methods)
+            else:
+                few_shot_sources = self.few_shot_sources["claims_to_inferences"]
+        
+        prompts_list = self._prompts_by_source(instance=prompt, target_n=20, few_shot_sources=few_shot_sources)
         response = await self.send_prompts_async(prompt_list=prompts_list)
         inferences = [i.capitalize().rstrip(".") if i[0].islower() else i.rstrip(".") for i in response]
         return inferences
 
-    async def inferences_to_generations(self, prompt: str, few_shot_sources: dict[str, dict] = None):
+    async def inferences_to_generations(self, prompt: str, few_shot_sources: dict[str, dict] = None, sampling_strategy: str = "temperature", sampling_value: float = 0.7):
+        """Generate text completions from inferences with configurable sampling
+        
+        Args:
+            prompt: The inference to generate completions from
+            few_shot_sources: Optional custom few-shot sources
+            sampling_strategy: 'temperature' or 'top_p'
+            sampling_value: Value for the sampling strategy (0.0-1.0)
+        """
+        # TODO: Implement sampling strategy configuration in send_prompts_async
         prompts_list = self._prompts_by_source(instance=prompt, target_n=20, few_shot_sources=few_shot_sources or self.few_shot_sources["inferences_to_generations"])
         response = await self.send_prompts_async(prompt_list=prompts_list)
         generations = [g for g in response] # if "->" not in g[0] + g[1]]  # infrequent bug
         return generations
+
+    def truncate_text_by_length(self, texts: list[str], n: float = 0.5, by_tokens: bool = True) -> list[tuple[str, str]]:
+        """Truncate input text to create prompts by length
+        
+        Args:
+            texts: List of text statements to truncate
+            n: Proportion (0-1) or absolute index for truncation
+            by_tokens: If True, tokenize; if False, split by whitespace
+            
+        Returns:
+            List of (prompt, target) tuples
+        """
+        try:
+            # Try to use transformers tokenizer if available
+            from transformers import GPT2Tokenizer
+            tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
+        except ImportError:
+            # Fallback to whitespace splitting
+            by_tokens = False
+        
+        prompts_and_targets = []
+        for text in texts:
+            if by_tokens and 'tokenizer' in locals():
+                toks = tokenizer.encode(text)
+                idx = int(len(toks) * n) if abs(n) < 1 else int(n)
+                prompt = tokenizer.decode(toks[:idx])
+                target = tokenizer.decode(toks[idx:])
+                prompts_and_targets.append((prompt, target))
+            else:
+                words = text.split(" ")
+                idx = int(len(words) * n) if abs(n) < 1 else int(n)
+                prompt = " ".join(words[:idx])
+                target = " " + " ".join(words[idx:])
+                prompts_and_targets.append((prompt, target))
+        return prompts_and_targets
+
+    def truncate_text_by_root(self, texts: list[str], use_last_root: bool = True) -> list[tuple[str, str]]:
+        """Truncate input text based on the root verb to create prompts
+        
+        Args:
+            texts: List of text statements to truncate
+            use_last_root: If True, use last root verb; if False, use first
+            
+        Returns:
+            List of (prompt, target) tuples
+        """
+        try:
+            import spacy
+            nlp = spacy.load("en_core_web_sm")
+        except (ImportError, OSError):
+            # Fallback to simple heuristic if spacy not available
+            print("⚠️  spaCy not available, using simple fallback for root truncation")
+            return self._truncate_by_root_fallback(texts)
+        
+        prompts_and_targets = []
+        use_last_root = -1 if use_last_root else 0
+        
+        for doc in nlp.pipe(texts):
+            try:
+                roots = [tok for tok in doc if tok.dep_ == "ROOT"]
+                if not roots:
+                    # No root found, fallback to half
+                    prompt = doc.text[:len(doc.text)//2]
+                    target = doc.text[len(doc.text)//2:]
+                    prompts_and_targets.append((prompt, target))
+                    continue
+                
+                root = roots[use_last_root]
+                # Check if the root is negated after its position
+                neg_indices = [c.i for c in root.children if c.dep_ == "neg"]
+                root_i = max([root.i] + neg_indices)
+                
+                prompt = doc[:root_i + 1].text
+                target = " " + doc[root_i + 1:].text
+                prompts_and_targets.append((prompt, target))
+            except (IndexError, AttributeError):
+                # Error parsing, fallback to half
+                prompt = doc.text[:len(doc.text)//2]
+                target = doc.text[len(doc.text)//2:]
+                prompts_and_targets.append((prompt, target))
+                
+        return prompts_and_targets
+
+    def _truncate_by_root_fallback(self, texts: list[str]) -> list[tuple[str, str]]:
+        """Simple fallback for root truncation when spaCy is not available"""
+        prompts_and_targets = []
+        
+        # Simple heuristic: find common verb patterns and truncate after them
+        verb_patterns = [" is ", " are ", " was ", " were ", " has ", " have ", " had ", " will ", " would ", " should ", " could "]
+        
+        for text in texts:
+            # Find the last occurrence of a verb pattern
+            best_idx = -1
+            for pattern in verb_patterns:
+                idx = text.rfind(pattern)
+                if idx > best_idx:
+                    best_idx = idx + len(pattern)
+            
+            if best_idx > 0:
+                prompt = text[:best_idx].strip()
+                target = " " + text[best_idx:].strip()
+            else:
+                # No verb pattern found, use half
+                prompt = text[:len(text)//2]
+                target = text[len(text)//2:]
+            
+            prompts_and_targets.append((prompt, target))
+        
+        return prompts_and_targets
+
+    async def truncate_text_with_gpt3(self, texts: list[str], claims: list[str]) -> list[tuple[str, str]]:
+        """Truncate input text using GPT-3 to find optimal truncation points
+        
+        Args:
+            texts: List of text statements to truncate
+            claims: Corresponding claims for each text
+            
+        Returns:
+            List of (prompt, target) tuples
+        """
+        # This would require additional few-shot examples for truncation
+        # For now, implement a simpler version that uses the model to suggest truncation points
+        
+        instruction = "Given a claim and sentence, identify where to truncate the sentence to create a good prompt that would likely lead to the claim being completed. Return only the truncated portion that should be used as the prompt."
+        
+        prompts_and_targets = []
+        
+        for text, claim in zip(texts, claims):
+            try:
+                truncation_prompt = f"Claim: {claim}\nSentence: {text}\nTruncated prompt:"
+                
+                # Use the orchestrator's target to generate truncation suggestion
+                response = await self.send_prompts_async(prompt_list=[truncation_prompt])
+                
+                if response:
+                    suggested_prompt = response[0].strip()
+                    # Verify the suggested prompt is actually a prefix of the original text
+                    if suggested_prompt in text:
+                        target = text.replace(suggested_prompt, "", 1).lstrip()
+                        prompts_and_targets.append((suggested_prompt, target))
+                    else:
+                        # Fallback to half if suggestion doesn't match
+                        prompt = text[:len(text)//2]
+                        target = text[len(text)//2:]
+                        prompts_and_targets.append((prompt, target))
+                else:
+                    # Fallback to half
+                    prompt = text[:len(text)//2]
+                    target = text[len(text)//2:]
+                    prompts_and_targets.append((prompt, target))
+                    
+            except Exception:
+                # Fallback to half on any error
+                prompt = text[:len(text)//2]
+                target = text[len(text)//2:]
+                prompts_and_targets.append((prompt, target))
+        
+        return prompts_and_targets
+
+    def create_test_prompts_from_generations(self, generations: list[str], claims: list[str] = None, truncation_strategies: list[str] = None) -> list[dict]:
+        """Convert generated statements into test prompts using various truncation strategies
+        
+        Args:
+            generations: List of generated text statements
+            claims: Optional corresponding claims (needed for GPT-3 truncation)
+            truncation_strategies: List of strategies to use ['half', '3_toks', 'root', 'gpt3']
+            
+        Returns:
+            List of dictionaries with test prompt information
+        """
+        if truncation_strategies is None:
+            truncation_strategies = ['half', '3_toks', 'root']
+        
+        if claims is None:
+            claims = [''] * len(generations)
+        
+        test_data = []
+        
+        truncation_methods = {
+            'half': lambda texts, _: self.truncate_text_by_length(texts, n=0.5),
+            '3_toks': lambda texts, _: self.truncate_text_by_length(texts, n=-3),
+            'root': lambda texts, _: self.truncate_text_by_root(texts),
+            'gpt3': lambda texts, claims: self._run_async_in_jupyter(self.truncate_text_with_gpt3(texts, claims))
+        }
+        
+        for strategy_name in truncation_strategies:
+            if strategy_name in truncation_methods:
+                try:
+                    truncator = truncation_methods[strategy_name]
+                    prompts_and_targets = truncator(generations, claims)
+                    
+                    for i, (prompt, target) in enumerate(prompts_and_targets):
+                        test_data.append({
+                            'strategy': strategy_name,
+                            'claim': claims[i] if i < len(claims) else '',
+                            'original_text': generations[i] if i < len(generations) else '',
+                            'prompt': prompt,
+                            'target_completion': target,
+                            'test_id': f"{strategy_name}_{i}"
+                        })
+                        
+                except Exception as e:
+                    print(f"⚠️  Error with {strategy_name} truncation: {str(e)}")
+                    continue
+        
+        return test_data
 
     async def send_prompts_async(
         self,
@@ -640,11 +898,12 @@ class TestGenieOrchestrator(Orchestrator):
         print("👆 Select a claim and click 'Confirm Selection' above to proceed")
         return claims
 
-    def generate_inferences_interactive(self, max_inferences: int = 3):
-        """Interactive inference generation with configuration options
+    def generate_inferences_interactive(self, max_inferences: int = 3, inference_methods: list[str] = None):
+        """Interactive inference generation with method selection and configuration options
         
         Args:
             max_inferences: Default number of inferences to generate
+            inference_methods: Default inference methods to select
             
         Returns:
             None (results stored in workflow_data)
@@ -660,12 +919,46 @@ class TestGenieOrchestrator(Orchestrator):
             print("❌ Please complete Step 2 (Select Claim) first!")
             return []
         
+        # Inference method options
+        inference_options = {
+            "pragmatic": "Pragmatic Inference - Infer implied claims likely to be believed",
+            "entailment": "Logical Entailment - Find claims logically entailed by the original", 
+            "paraphrase": "Paraphrase - Find paraphrases and restatements of the claim"
+        }
+        
+        default_methods = inference_methods or ["paraphrase", "entailment", "pragmatic"]
+        
         # Create configuration widgets
+        method_selector = widgets.SelectMultiple(
+            options=[(inference_options[k], k) for k in inference_options.keys()],
+            value=default_methods,
+            description='Methods:',
+            style={'description_width': 'initial'},
+            layout=widgets.Layout(height='100px', width='90%')
+        )
+        
         inference_count = widgets.IntSlider(
             value=max_inferences,
             min=1,
             max=10,
             description='Count:',
+            style={'description_width': 'initial'}
+        )
+        
+        # Sampling strategy configuration
+        sampling_strategy = widgets.RadioButtons(
+            options=[('Temperature (more focused)', 'temperature'), ('Top-p (more diverse)', 'top_p')],
+            value='temperature',
+            description='Sampling:',
+            style={'description_width': 'initial'}
+        )
+        
+        sampling_value = widgets.FloatSlider(
+            value=0.7,
+            min=0.0,
+            max=1.0,
+            step=0.05,
+            description='Value:',
             style={'description_width': 'initial'}
         )
         
@@ -679,7 +972,12 @@ class TestGenieOrchestrator(Orchestrator):
         
         display(widgets.VBox([
             widgets.HTML(f"<h4>Generate inferences for: <em>{selected_claim}</em></h4>"),
+            widgets.HTML("<p>Select inference methods to use:</p>"),
+            method_selector,
             inference_count,
+            widgets.HTML("<p>Configure generation sampling:</p>"),
+            sampling_strategy,
+            sampling_value,
             generate_button,
             output_area
         ]))
@@ -690,25 +988,40 @@ class TestGenieOrchestrator(Orchestrator):
                 print("🔄 Generating inferences...")
                 
                 try:
+                    selected_methods = list(method_selector.value)
                     count = inference_count.value
-                    print(f"🧠 Generating up to {count} inferences...")
+                    strategy = sampling_strategy.value
+                    value = sampling_value.value
                     
-                    # Use actual orchestrator method to generate inferences
+                    if not selected_methods:
+                        print("❌ Please select at least one inference method!")
+                        return
+                    
+                    print(f"🧠 Using methods: {', '.join(selected_methods)}")
+                    print(f"⚙️  Sampling: {strategy} = {value}")
+                    print(f"📊 Generating up to {count} inferences...")
+                    
+                    # Use actual orchestrator method to generate inferences with method filtering
                     try:
                         # Run the async inference generation using helper method
-                        all_inferences = self._run_async_in_jupyter(self.claims_to_inferences(selected_claim))
+                        all_inferences = self._run_async_in_jupyter(
+                            self.claims_to_inferences(selected_claim, inference_methods=selected_methods)
+                        )
                         
                         # Limit to requested count
                         inferences = all_inferences[:count] if count < len(all_inferences) else all_inferences
                         
-                        # Store results
+                        # Store results including method selection and sampling config
                         self.workflow_data['inferences'] = inferences
+                        self.workflow_data['inference_methods'] = selected_methods
+                        self.workflow_data['sampling_strategy'] = strategy
+                        self.workflow_data['sampling_value'] = value
                         
                         print(f"\n✅ Generated {len(inferences)} inferences:")
                         for i, inference in enumerate(inferences, 1):
                             print(f"   {i}. {inference}")
                         
-                        print(f"\n📈 Generated {len(inferences)} inferences from 1 claim")
+                        print(f"\n📈 Generated {len(inferences)} inferences using {len(selected_methods)} methods")
                         print("\n➡️  Next: Run Step 4 to generate test prompts")
                         
                     except Exception as e:
@@ -837,12 +1150,133 @@ class TestGenieOrchestrator(Orchestrator):
         print("👆 Configure settings and click 'Generate Tests' above to proceed")
         return None
 
+    def create_test_prompts_interactive(self, default_strategies: list[str] = None):
+        """Interactive test prompt creation with truncation strategy selection
+        
+        Args:
+            default_strategies: Default truncation strategies to select
+            
+        Returns:
+            None (results stored in workflow_data)
+        """
+        try:
+            import ipywidgets as widgets
+            from IPython.display import display, clear_output
+        except ImportError:
+            raise ImportError("ipywidgets and IPython are required for interactive functionality.")
+        
+        all_tests = self.workflow_data.get('all_tests', [])
+        if not all_tests:
+            print("❌ Please complete Step 4 (Generate Tests) first!")
+            return []
+        
+        # Truncation strategy options
+        truncation_options = {
+            "half": "In Half - Remove half of the tokens to create prompt",
+            "3_toks": "Last 3 Tokens - Remove the last 3 tokens from statements",
+            "root": "After Root Verb - Remove all terms after root verb",
+            "gpt3": "With GPT-3 - Use AI to find optimal truncation point"
+        }
+        
+        default_strategies = default_strategies or ["half", "3_toks", "root"]
+        
+        # Create configuration widgets
+        strategy_selector = widgets.SelectMultiple(
+            options=[(truncation_options[k], k) for k in truncation_options.keys()],
+            value=default_strategies,
+            description='Strategies:',
+            style={'description_width': 'initial'},
+            layout=widgets.Layout(height='120px', width='90%')
+        )
+        
+        create_button = widgets.Button(
+            description="Create Test Prompts",
+            button_style='success',
+            icon='scissors'
+        )
+        
+        output_area = widgets.Output()
+        
+        display(widgets.VBox([
+            widgets.HTML(f"<h4>Create test prompts from {len(all_tests)} generated statements:</h4>"),
+            widgets.HTML("<p>Select truncation strategies to convert statements into testable prompts:</p>"),
+            strategy_selector,
+            create_button,
+            output_area
+        ]))
+        
+        def on_create_clicked(b):
+            with output_area:
+                clear_output()
+                print("✂️  Creating test prompts...")
+                
+                try:
+                    selected_strategies = list(strategy_selector.value)
+                    
+                    if not selected_strategies:
+                        print("❌ Please select at least one truncation strategy!")
+                        return
+                    
+                    print(f"🔧 Using strategies: {', '.join(selected_strategies)}")
+                    print(f"📝 Processing {len(all_tests)} statements...")
+                    
+                    # Get corresponding claims if available
+                    selected_inferences = self.workflow_data.get('selected_inferences', [])
+                    claims = selected_inferences * (len(all_tests) // len(selected_inferences) + 1) if selected_inferences else []
+                    claims = claims[:len(all_tests)]  # Trim to match test count
+                    
+                    # Create test prompts using selected strategies
+                    test_prompts = self.create_test_prompts_from_generations(
+                        generations=all_tests,
+                        claims=claims,
+                        truncation_strategies=selected_strategies
+                    )
+                    
+                    # Store results
+                    self.workflow_data['test_prompts'] = test_prompts
+                    self.workflow_data['truncation_strategies'] = selected_strategies
+                    
+                    print(f"\n✅ Created {len(test_prompts)} test prompts!")
+                    
+                    # Show statistics by strategy
+                    strategy_counts = {}
+                    for prompt_data in test_prompts:
+                        strategy = prompt_data['strategy']
+                        strategy_counts[strategy] = strategy_counts.get(strategy, 0) + 1
+                    
+                    print("\n📊 Prompts by strategy:")
+                    for strategy, count in strategy_counts.items():
+                        print(f"   {strategy}: {count} prompts")
+                    
+                    # Show sample prompts
+                    print(f"\n📋 Sample test prompts:")
+                    for i, prompt_data in enumerate(test_prompts[:5], 1):
+                        prompt = prompt_data['prompt']
+                        strategy = prompt_data['strategy']
+                        preview = prompt[:80] + "..." if len(prompt) > 80 else prompt
+                        print(f"   {i}. [{strategy}] {preview}")
+                    
+                    if len(test_prompts) > 5:
+                        print(f"   ... and {len(test_prompts) - 5} more prompts")
+                    
+                    print(f"\n🎯 Ready to test target models with {len(test_prompts)} prompts!")
+                    print("\n➡️  Next: Use prompts to test your target language models")
+                    
+                except Exception as e:
+                    print(f"❌ Error creating test prompts: {str(e)}")
+                    print("Please check your configuration and try again.")
+        
+        create_button.on_click(on_create_clicked)
+        
+        print("👆 Select truncation strategies and click 'Create Test Prompts' above to proceed")
+        return None
+
     def get_workflow_summary(self):
         """Get comprehensive workflow summary
         
         Returns:
             Dictionary containing all workflow data including utterance, claims,
-            selected claim, inferences, and generated tests
+            selected claim, inferences, generated tests, and configuration options
         """
         return {
             'utterance': self.workflow_data.get('utterance', ''),
@@ -851,6 +1285,11 @@ class TestGenieOrchestrator(Orchestrator):
             'selected_claim_index': self.workflow_data.get('selected_claim_index', 0),
             'inferences': self.workflow_data.get('inferences', []),
             'selected_inferences': self.workflow_data.get('selected_inferences', []),
+            'inference_methods': self.workflow_data.get('inference_methods', []),
+            'sampling_strategy': self.workflow_data.get('sampling_strategy', 'temperature'),
+            'sampling_value': self.workflow_data.get('sampling_value', 0.7),
             'all_tests': self.workflow_data.get('all_tests', []),
-            'tests_per_inference': self.workflow_data.get('tests_per_inference', 0)
+            'tests_per_inference': self.workflow_data.get('tests_per_inference', 0),
+            'test_prompts': self.workflow_data.get('test_prompts', []),
+            'truncation_strategies': self.workflow_data.get('truncation_strategies', [])
         }

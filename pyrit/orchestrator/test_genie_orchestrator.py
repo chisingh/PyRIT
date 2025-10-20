@@ -298,13 +298,15 @@ class TestGenieOrchestrator(Orchestrator):
         
         return filtered_sources
 
-    async def claims_to_inferences(self, prompt: str, few_shot_sources: dict[str, dict] = None, inference_methods: list[str] = None):
-        """Generate inferences from claims with optional method filtering
+    async def claims_to_inferences(self, prompt: str, few_shot_sources: dict[str, dict] = None, inference_methods: list[str] = None, sampling_strategy: str = "temperature", sampling_value: float = 0.7):
+        """Generate inferences from claims with optional method filtering and sampling configuration
         
         Args:
             prompt: The claim to generate inferences from
             few_shot_sources: Optional custom few-shot sources
             inference_methods: List of inference methods to use ['pragmatic', 'entailment', 'paraphrase']
+            sampling_strategy: 'temperature' or 'top_p'
+            sampling_value: Value for the sampling strategy (0.0-1.0)
         """
         if few_shot_sources is None:
             if inference_methods:
@@ -313,7 +315,15 @@ class TestGenieOrchestrator(Orchestrator):
                 few_shot_sources = self.few_shot_sources["claims_to_inferences"]
         
         prompts_list = self._prompts_by_source(instance=prompt, target_n=20, few_shot_sources=few_shot_sources)
-        response = await self.send_prompts_async(prompt_list=prompts_list)
+        
+        # Create metadata to store sampling configuration
+        sampling_metadata = {
+            "sampling_strategy": sampling_strategy,
+            "sampling_value": sampling_value,
+            "inference_methods": inference_methods or []
+        }
+        
+        response = await self.send_prompts_async(prompt_list=prompts_list, metadata=sampling_metadata)
         inferences = [i.capitalize().rstrip(".") if i[0].islower() else i.rstrip(".") for i in response]
         return inferences
 
@@ -326,9 +336,15 @@ class TestGenieOrchestrator(Orchestrator):
             sampling_strategy: 'temperature' or 'top_p'
             sampling_value: Value for the sampling strategy (0.0-1.0)
         """
-        # TODO: Implement sampling strategy configuration in send_prompts_async
         prompts_list = self._prompts_by_source(instance=prompt, target_n=20, few_shot_sources=few_shot_sources or self.few_shot_sources["inferences_to_generations"])
-        response = await self.send_prompts_async(prompt_list=prompts_list)
+        
+        # Create metadata to store sampling configuration
+        sampling_metadata = {
+            "sampling_strategy": sampling_strategy,
+            "sampling_value": sampling_value
+        }
+        
+        response = await self.send_prompts_async(prompt_list=prompts_list, metadata=sampling_metadata)
         generations = [g for g in response] # if "->" not in g[0] + g[1]]  # infrequent bug
         return generations
 
@@ -1005,7 +1021,8 @@ class TestGenieOrchestrator(Orchestrator):
                     try:
                         # Run the async inference generation using helper method
                         all_inferences = self._run_async_in_jupyter(
-                            self.claims_to_inferences(selected_claim, inference_methods=selected_methods)
+                            self.claims_to_inferences(selected_claim, inference_methods=selected_methods,
+                                                    sampling_strategy=strategy, sampling_value=value)
                         )
                         
                         # Limit to requested count
@@ -1101,18 +1118,25 @@ class TestGenieOrchestrator(Orchestrator):
                     selected_inferences = [inferences[i] for i in selected_indices]
                     tests_count = test_count_slider.value
                     
+                    # Get saved sampling configuration from previous step
+                    saved_strategy = self.workflow_data.get('sampling_strategy', 'temperature')
+                    saved_value = self.workflow_data.get('sampling_value', 0.7)
+                    
                     print(f"🧪 Processing {len(selected_inferences)} inferences...")
                     print(f"📊 Generating {tests_count} tests per inference...")
+                    print(f"⚙️  Using saved sampling: {saved_strategy} = {saved_value}")
                     
                     all_tests = []
                     
-                    # Use actual orchestrator method to generate tests
+                    # Use actual orchestrator method to generate tests with sampling config
                     for i, inference in enumerate(selected_inferences, 1):
                         print(f"\n📝 Processing inference {i}/{len(selected_inferences)}...")
                         
                         try:
-                            # Run the async test generation for this inference using helper method
-                            inference_tests = self._run_async_in_jupyter(self.inferences_to_generations(inference))
+                            # Run the async test generation for this inference using helper method with sampling
+                            inference_tests = self._run_async_in_jupyter(
+                                self.inferences_to_generations(inference, sampling_strategy=saved_strategy, sampling_value=saved_value)
+                            )
                             
                             # Limit to requested count per inference
                             limited_tests = inference_tests[:tests_count] if tests_count < len(inference_tests) else inference_tests

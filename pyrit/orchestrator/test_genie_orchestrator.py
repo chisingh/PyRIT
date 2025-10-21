@@ -128,8 +128,30 @@ if CLASSIFIER_DEPS_AVAILABLE:
             """Process the annotation dataframe"""
             gen_df = gen_df.copy()
             assert {"claim", "inst", "label"}.issubset(gen_df.columns)
-            ce_probs = self.encoder.predict(gen_df[["claim", "inst"]].values.tolist())
-            gen_df[self.labels] = ce_probs[:, self.ids]
+            
+            # Create sentence pairs for cross-encoder
+            sentence_pairs = []
+            for _, row in gen_df[["claim", "inst"]].iterrows():
+                sentence_pairs.append([str(row["claim"]), str(row["inst"])])
+            
+            ce_probs = self.encoder.predict(sentence_pairs)
+            
+            # Handle different output shapes from cross-encoder
+            if len(ce_probs.shape) == 1:
+                # Single score output - convert to binary probabilities
+                import numpy as np
+                ce_probs_2d = np.column_stack([1 - ce_probs, ce_probs])
+            else:
+                ce_probs_2d = ce_probs
+            
+            # Assign each column individually to avoid pandas assignment issues
+            for i, label_name in enumerate(self.labels):
+                if i < ce_probs_2d.shape[1]:  # Make sure we have enough columns
+                    gen_df[label_name] = ce_probs_2d[:, i]
+                else:
+                    # Fallback for missing columns
+                    gen_df[label_name] = 0.5
+                    
             train_df, test_df = self._split_data(
                 gen_df, remove_claims_with_homogenous_label, rebalance=rebalance
             )
@@ -2105,6 +2127,16 @@ class TestGenieOrchestrator(Orchestrator):
         Returns:
             bool: True if successful, False if dependencies unavailable
         """
+        # Ensure classifier_state exists in workflow_data
+        if 'classifier_state' not in self.workflow_data:
+            self.workflow_data['classifier_state'] = {
+                'trained_classifier': None,
+                'classifier_type': None,
+                'training_data': None,
+                'predictions': None,
+                'uncertainty_scores': None,
+            }
+        
         if not CLASSIFIER_DEPS_AVAILABLE:
             print("⚠️  Classifier dependencies not available. Install transformers, setfit, sentence-transformers, sklearn, and torch.")
             return False
@@ -2167,7 +2199,7 @@ class TestGenieOrchestrator(Orchestrator):
             return False
         
         # Get annotations as DataFrame
-        annotations_df = self.get_annotations_dataframe()
+        annotations_df = self.workflow_data.get('annotated_df')
         if annotations_df is None or len(annotations_df) == 0:
             print("⚠️  No annotations available for training.")
             return False
@@ -2193,28 +2225,47 @@ class TestGenieOrchestrator(Orchestrator):
         })
         
         try:
-            # Prep data for training
-            prep_train_df, prep_test_df = classifier.prep_data(
-                train_df[['claim', 'inst', 'label']],
-                remove_claims_with_homogenous_label=False,
-                rebalance=True
-            )
-            
-            # Fit classifier if requested and data available
-            if do_fit and len(prep_train_df) > 0:
-                classifier.fit(prep_train_df)
-                self.workflow_data['classifier_state']['training_data'] = prep_train_df
-                print(f"✅ Trained classifier on {len(prep_train_df)} annotations")
-                return True
-            elif not do_fit:
-                print(f"📊 Prepared {len(prep_train_df)} training samples (fit skipped)")
+            # Use direct training approach to bypass prep_data DataFrame indexing issues
+            if do_fit:
+                from sentence_transformers import InputExample
+                from torch.utils.data import DataLoader
+                
+                # Prepare training data directly
+                sentences1 = clean_df['claim'].astype(str).tolist()
+                sentences2 = clean_df['inst'].astype(str).tolist()
+                labels = clean_df['label_numeric'].astype(float).tolist()
+                
+                print(f"📊 Training classifier on {len(sentences1)} annotations...")
+                print(f"   • Label distribution: {clean_df['label'].value_counts().to_dict()}")
+                
+                # Create training examples
+                train_examples = []
+                for i in range(len(sentences1)):
+                    example = InputExample(texts=[sentences1[i], sentences2[i]], label=labels[i])
+                    train_examples.append(example)
+                
+                train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=2)
+                
+                # Train the cross-encoder directly (bypasses problematic prep_data method)
+                classifier.encoder.fit(
+                    train_dataloader=train_dataloader,
+                    epochs=1,
+                    warmup_steps=10,
+                    show_progress_bar=True
+                )
+                
+                # Store training data for reference
+                self.workflow_data['classifier_state']['training_data'] = clean_df
+                print(f"✅ Trained classifier on {len(clean_df)} annotations")
                 return True
             else:
-                print("⚠️  No training data available after preprocessing")
-                return False
+                print(f"📊 Training skipped (do_fit=False)")
+                return True
                 
         except Exception as e:
             print(f"❌ Error training classifier: {str(e)}")
+            import traceback
+            traceback.print_exc()
             return False
 
     def predict_test_failures(self, test_results: list = None) -> list:
@@ -2446,8 +2497,21 @@ class TestGenieOrchestrator(Orchestrator):
                     if training_data is not None:
                         print(f"📊 Training Summary:")
                         print(f"   • Training samples: {len(training_data)}")
-                        print(f"   • Positive labels: {training_data['label'].sum()}")
-                        print(f"   • Negative labels: {len(training_data) - training_data['label'].sum()}")
+                        
+                        # Count labels properly (handle both string and numeric labels)
+                        if 'label_numeric' in training_data.columns:
+                            positive_count = training_data['label_numeric'].sum()
+                            negative_count = len(training_data) - positive_count
+                        else:
+                            # Count string labels
+                            label_counts = training_data['label'].value_counts()
+                            concerning_count = label_counts.get('concerning', 0)
+                            safe_count = label_counts.get('safe', 0)
+                            positive_count = concerning_count
+                            negative_count = safe_count
+                        
+                        print(f"   • Concerning labels: {positive_count}")
+                        print(f"   • Safe labels: {negative_count}")
                 else:
                     print("❌ Failed to train classifier")
         
@@ -2540,7 +2604,7 @@ class TestGenieOrchestrator(Orchestrator):
         gen_df = pd.DataFrame(test_data)
         
         # Add any existing annotations to the DataFrame
-        annotations_df = self.get_annotations_dataframe()
+        annotations_df = self.workflow_data.get('annotated_df')
         if annotations_df is not None and len(annotations_df) > 0:
             # Map annotations to test data
             for idx, row in gen_df.iterrows():
@@ -2612,7 +2676,7 @@ class TestGenieOrchestrator(Orchestrator):
             bool: True if successful
         """
         # Get current annotations
-        annotations_df = self.get_annotations_dataframe()
+        annotations_df = self.workflow_data.get('annotated_df')
         if annotations_df is None or len(annotations_df) == 0:
             print("❌ No annotations available to use as exemplars")
             return False
@@ -3241,21 +3305,52 @@ class TestGenieOrchestrator(Orchestrator):
                     with status_area:
                         clear_output()
                         print("🔄 Launching claims generation interface...")
-                    self.utterances_to_claims_interactive()
+                    self.extract_claims_interactive()
                 
                 # Step 2: Inferences generation
                 def on_step2_clicked(b):
                     with status_area:
                         clear_output()
+                        
+                        # Check if we have claims first
+                        claims = self.workflow_data.get('claims', [])
+                        if not claims:
+                            print("❌ Please complete Step 1 (Generate Claims) first!")
+                            print("🔄 Launching claims generation interface...")
+                            self.extract_claims_interactive()
+                            return
+                        
+                        # Check if a claim has been selected
+                        selected_claim = self.workflow_data.get('selected_claim')
+                        if not selected_claim:
+                            print("❌ Please select a claim first!")
+                            print("🔄 Launching claim selection interface...")
+                            self.select_claim_interactive()
+                            return
+                        
                         print("🔄 Launching inferences generation interface...")
-                    self.claims_to_inferences_interactive()
+                    self.generate_inferences_interactive()
                 
                 # Step 3: Test prompts generation
                 def on_step3_clicked(b):
                     with status_area:
                         clear_output()
+                        
+                        # Check prerequisites
+                        selected_claim = self.workflow_data.get('selected_claim')
+                        if not selected_claim:
+                            print("❌ Please complete Steps 1-2 first!")
+                            return
+                        
+                        inferences = self.workflow_data.get('inferences', [])
+                        if not inferences:
+                            print("❌ Please complete Step 2 (Generate Inferences) first!")
+                            print("🔄 Launching inferences generation interface...")
+                            self.generate_inferences_interactive()
+                            return
+                        
                         print("🔄 Launching test prompts generation interface...")
-                    self.inferences_to_generations_interactive()
+                    self.generate_tests_interactive()
                 
                 # Step 4: Target testing
                 def on_step4_clicked(b):
@@ -3333,7 +3428,8 @@ class TestGenieOrchestrator(Orchestrator):
         # Classifier state
         classifier_state = self.workflow_data.get('classifier_state', {})
         classifier_trained = classifier_state.get('trained_classifier') is not None
-        predictions_available = len(classifier_state.get('predictions', [])) > 0
+        predictions = classifier_state.get('predictions', [])
+        predictions_available = predictions is not None and len(predictions) > 0
         
         # Progress calculation
         steps_completed = 0
@@ -3371,8 +3467,8 @@ class TestGenieOrchestrator(Orchestrator):
             'classifier_stats': {
                 'classifier_trained': classifier_trained,
                 'predictions_available': predictions_available,
-                'training_data_size': len(classifier_state.get('training_data', [])),
-                'uncertainty_scores_available': len(classifier_state.get('uncertainty_scores', [])) > 0
+                'training_data_size': len(classifier_state.get('training_data', [])) if classifier_state.get('training_data') is not None else 0,
+                'uncertainty_scores_available': len(classifier_state.get('uncertainty_scores', [])) > 0 if classifier_state.get('uncertainty_scores') is not None else False
             },
             'workflow_stats': {
                 'total_rounds': len(round_history) + 1,

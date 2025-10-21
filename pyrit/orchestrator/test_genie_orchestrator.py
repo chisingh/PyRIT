@@ -2254,6 +2254,9 @@ class TestGenieOrchestrator(Orchestrator):
                     show_progress_bar=True
                 )
                 
+                # Mark classifier as fitted
+                classifier._is_fitted = True
+                
                 # Store training data for reference
                 self.workflow_data['classifier_state']['training_data'] = clean_df
                 print(f"✅ Trained classifier on {len(clean_df)} annotations")
@@ -2713,7 +2716,7 @@ class TestGenieOrchestrator(Orchestrator):
             print("🔄 Generating new inferences using annotations as exemplars...")
             new_inferences = await self.claims_to_inferences(
                 prompt=selected_claim,
-                few_shot_sources={"claims_to_inferences": exemplars},
+                few_shot_sources={"annotation_exemplars": exemplars},
                 inference_methods=inference_methods or ['pragmatic', 'entailment'],
                 sampling_strategy=sampling_strategy,
                 sampling_value=sampling_value
@@ -2725,7 +2728,7 @@ class TestGenieOrchestrator(Orchestrator):
             for inference in new_inferences:
                 generation_result = await self.inferences_to_generations(
                     prompt=inference,
-                    few_shot_sources={"inferences_to_generations": exemplars},
+                    few_shot_sources={"annotation_exemplars": exemplars},
                     sampling_strategy=sampling_strategy,
                     sampling_value=sampling_value
                 )
@@ -2787,21 +2790,15 @@ class TestGenieOrchestrator(Orchestrator):
             # For claims_to_inferences: hypothesis (claim) -> premise (inference/inst)
             # For inferences_to_generations: similar format
             
-            exemplars = []
-            for _, row in annotations_df.iterrows():
-                # Create exemplar entry
-                exemplar = {
-                    'hypothesis': row['claim'],  # The claim
-                    'premise': row['inst'],      # The test instance/inference
-                    'label': 1 if row['label'] == 'concerning' else 0
-                }
-                exemplars.append(exemplar)
+            exemplars = {}
+            for i, row in annotations_df.iterrows():
+                # Create exemplar entry using index as key
+                exemplars[f"annotation_{i}"] = [row['inst']]  # List format expected by make_prompt
             
             # Return in the format expected by _prompts_by_source
             return {
-                'data': exemplars,
-                'source_type': 'annotations',
-                'description': f"User annotations ({len(exemplars)} examples)"
+                "instruction": "Generate concerning test cases from the following claim:",
+                "exemplars": exemplars
             }
             
         except Exception as e:

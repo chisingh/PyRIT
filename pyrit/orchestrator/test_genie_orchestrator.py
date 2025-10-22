@@ -524,16 +524,26 @@ class TestGenieOrchestrator(Orchestrator):
         inferences = [i.capitalize().rstrip(".") if i[0].islower() else i.rstrip(".") for i in response]
         return inferences
 
-    async def inferences_to_generations(self, prompt: str, few_shot_sources: dict[str, dict] = None, sampling_strategy: str = "temperature", sampling_value: float = 0.7):
-        """Generate text completions from inferences with configurable sampling
+    async def inferences_to_generations(self, prompt: str, few_shot_sources: dict[str, dict] = None, sampling_strategy: str = "temperature", sampling_value: float = 0.7, max_retries: int = 3, reduce_on_timeout: bool = True):
+        """Generate text completions from inferences with configurable sampling and robust error handling
         
         Args:
             prompt: The inference to generate completions from
             few_shot_sources: Optional custom few-shot sources
             sampling_strategy: 'temperature' or 'top_p'
             sampling_value: Value for the sampling strategy (0.0-1.0)
+            max_retries: Number of retries for failed API calls
+            reduce_on_timeout: If True, reduce batch size on timeout and retry
         """
+        import asyncio
         prompts_list = self._prompts_by_source(instance=prompt, target_n=20, few_shot_sources=few_shot_sources or self.few_shot_sources["inferences_to_generations"])
+        
+        # Log prompt statistics for debugging
+        if self._verbose:
+            total_chars = sum(len(p) for p in prompts_list)
+            avg_chars = total_chars / len(prompts_list) if prompts_list else 0
+            max_chars = max(len(p) for p in prompts_list) if prompts_list else 0
+            print(f"📊 Generated {len(prompts_list)} prompts, avg: {avg_chars:.0f} chars, max: {max_chars:,} chars")
         
         # Create metadata to store sampling configuration
         sampling_metadata = {
@@ -541,9 +551,63 @@ class TestGenieOrchestrator(Orchestrator):
             "sampling_value": sampling_value
         }
         
-        response = await self.send_prompts_async(prompt_list=prompts_list, metadata=sampling_metadata)
-        generations = [g for g in response] # if "->" not in g[0] + g[1]]  # infrequent bug
-        return generations
+        # Implement retry logic with exponential backoff
+        for attempt in range(max_retries + 1):
+            try:
+                # Reduce batch size if we've had timeouts and this is a retry
+                if attempt > 0 and reduce_on_timeout:
+                    # Split prompts into smaller batches
+                    batch_size = max(1, len(prompts_list) // (2 ** attempt))
+                    if self._verbose:
+                        print(f"🔄 Retry {attempt}: reducing to {batch_size} prompts per batch")
+                    
+                    # Process in smaller batches
+                    all_responses = []
+                    for i in range(0, len(prompts_list), batch_size):
+                        batch = prompts_list[i:i + batch_size]
+                        if self._verbose:
+                            print(f"   📤 Processing batch {i//batch_size + 1}/{(len(prompts_list) + batch_size - 1)//batch_size}")
+                        
+                        batch_response = await self.send_prompts_async(prompt_list=batch, metadata=sampling_metadata)
+                        all_responses.extend(batch_response)
+                        
+                        # Small delay between batches to avoid rate limits
+                        if i + batch_size < len(prompts_list):
+                            await asyncio.sleep(1)
+                    
+                    response = all_responses
+                else:
+                    # First attempt or no reduction - send all at once
+                    response = await self.send_prompts_async(prompt_list=prompts_list, metadata=sampling_metadata)
+                
+                # Success - process results
+                generations = [g for g in response] # if "->" not in g[0] + g[1]]  # infrequent bug
+                
+                if self._verbose and attempt > 0:
+                    print(f"✅ Success on attempt {attempt + 1}")
+                
+                return generations
+                
+            except asyncio.TimeoutError:
+                if attempt < max_retries:
+                    wait_time = 2 ** attempt  # Exponential backoff
+                    if self._verbose:
+                        print(f"⏰ Timeout on attempt {attempt + 1}, retrying in {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    if self._verbose:
+                        print(f"❌ Final timeout after {max_retries + 1} attempts")
+                    raise TimeoutError(f"API calls timed out after {max_retries + 1} attempts")
+                    
+            except Exception as e:
+                if attempt < max_retries and "rate limit" in str(e).lower():
+                    wait_time = 5 * (attempt + 1)  # Longer wait for rate limits
+                    if self._verbose:
+                        print(f"🚦 Rate limit on attempt {attempt + 1}, waiting {wait_time}s...")
+                    await asyncio.sleep(wait_time)
+                else:
+                    # Re-raise other exceptions or final rate limit
+                    raise e
 
     def truncate_text_by_length(self, texts: list[str], n: float = 0.5, by_tokens: bool = True) -> list[tuple[str, str]]:
         """Truncate input text to create prompts by length
@@ -1091,10 +1155,23 @@ class TestGenieOrchestrator(Orchestrator):
                 self._memory.add_request_response_to_memory(request=request)
         return conversation_id
 
-    def _run_async_in_jupyter(self, coro):
-        """Helper method to run async coroutines in Jupyter notebooks"""
+    def _run_async_in_jupyter(self, coro, timeout_seconds: int = 60):
+        """Helper method to run async coroutines in Jupyter notebooks with timeout
+        
+        Args:
+            coro: The coroutine to run
+            timeout_seconds: Maximum time to wait before timing out (default: 60 seconds)
+            
+        Returns:
+            Result from the coroutine
+            
+        Raises:
+            TimeoutError: If the operation takes longer than timeout_seconds
+            Exception: Any exception from the coroutine
+        """
         import asyncio
         import threading
+        import time
         
         try:
             # Check if we're in a Jupyter environment with a running event loop
@@ -1103,27 +1180,44 @@ class TestGenieOrchestrator(Orchestrator):
             # We have a running event loop, run in a separate thread with new loop
             result = [None]
             exception = [None]
+            completed = [False]
             
             def run_coro():
                 try:
                     new_loop = asyncio.new_event_loop()
                     asyncio.set_event_loop(new_loop)
-                    result[0] = new_loop.run_until_complete(coro)
+                    
+                    # Add timeout to the coroutine itself
+                    async def with_timeout():
+                        return await asyncio.wait_for(coro, timeout=timeout_seconds)
+                    
+                    result[0] = new_loop.run_until_complete(with_timeout())
                     new_loop.close()
+                    completed[0] = True
+                except asyncio.TimeoutError:
+                    exception[0] = TimeoutError(f"Operation timed out after {timeout_seconds} seconds")
                 except Exception as e:
                     exception[0] = e
+                finally:
+                    completed[0] = True
             
             thread = threading.Thread(target=run_coro)
             thread.start()
-            thread.join()
+            
+            # Wait for thread with timeout
+            thread.join(timeout=timeout_seconds + 5)  # Give extra 5 seconds for cleanup
+            
+            if not completed[0]:
+                # Thread is still running, which means timeout didn't work properly
+                raise TimeoutError(f"Operation timed out after {timeout_seconds} seconds (thread still running)")
             
             if exception[0]:
                 raise exception[0]
             return result[0]
                 
         except RuntimeError:
-            # No running event loop, we can use asyncio.run normally
-            return asyncio.run(coro)
+            # No running event loop, we can use asyncio.run with timeout
+            return asyncio.run(asyncio.wait_for(coro, timeout=timeout_seconds))
 
     def extract_claims_interactive(self, utterance: str = ""):
         """Interactive claims extraction with text input widget
@@ -1439,11 +1533,12 @@ class TestGenieOrchestrator(Orchestrator):
         print("👆 Configure settings and click 'Generate Inferences' above to proceed")
         return None
 
-    def generate_tests_interactive(self, tests_per_inference: int = 2):
-        """Interactive test generation with inference selection
+    def generate_tests_interactive(self, tests_per_inference: int = 2, timeout_seconds: int = 60):
+        """Interactive test generation with inference selection and timeout protection
         
         Args:
             tests_per_inference: Default number of tests to generate per inference
+            timeout_seconds: Maximum time to wait for each API call before timing out
             
         Returns:
             None (results stored in workflow_data)
@@ -1476,31 +1571,58 @@ class TestGenieOrchestrator(Orchestrator):
             style={'description_width': 'initial'}
         )
         
+        timeout_slider = widgets.IntSlider(
+            value=timeout_seconds,
+            min=30,
+            max=300,
+            step=30,
+            description='Timeout (seconds):',
+            style={'description_width': 'initial'}
+        )
+        
         generate_button = widgets.Button(
             description="Generate Tests",
             button_style='primary',
             icon='flask'
         )
         
+        cancel_button = widgets.Button(
+            description="Cancel",
+            button_style='warning',
+            icon='stop',
+            disabled=True
+        )
+        
         output_area = widgets.Output()
+        
+        # Create cancellation flag
+        cancellation_flag = {'cancelled': False}
         
         display(widgets.VBox([
             widgets.HTML("<h4>Select inferences to generate tests from:</h4>"),
             inference_selector,
             test_count_slider,
-            generate_button,
+            timeout_slider,
+            widgets.HBox([generate_button, cancel_button]),
             output_area
         ]))
         
         def on_generate_clicked(b):
+            # Reset cancellation flag and update button states
+            cancellation_flag['cancelled'] = False
+            generate_button.disabled = True
+            cancel_button.disabled = False
+            
             with output_area:
                 clear_output()
                 print("🔄 Generating test prompts...")
+                print("💡 Click 'Cancel' button if you need to stop the process")
                 
                 try:
                     selected_indices = list(inference_selector.value)
                     selected_inferences = [inferences[i] for i in selected_indices]
                     tests_count = test_count_slider.value
+                    timeout_value = timeout_slider.value
                     
                     # Get saved sampling configuration from previous step
                     saved_strategy = self.workflow_data.get('sampling_strategy', 'temperature')
@@ -1509,53 +1631,100 @@ class TestGenieOrchestrator(Orchestrator):
                     print(f"🧪 Processing {len(selected_inferences)} inferences...")
                     print(f"📊 Generating {tests_count} tests per inference...")
                     print(f"⚙️  Using saved sampling: {saved_strategy} = {saved_value}")
+                    print(f"⏰ API timeout: {timeout_value} seconds per inference")
                     
                     all_tests = []
                     
                     # Use actual orchestrator method to generate tests with sampling config
                     for i, inference in enumerate(selected_inferences, 1):
+                        # Check for cancellation before each inference
+                        if cancellation_flag['cancelled']:
+                            print(f"\n⚠️  Operation cancelled by user after processing {i-1} inferences")
+                            break
+                            
                         print(f"\n📝 Processing inference {i}/{len(selected_inferences)}...")
                         
                         try:
-                            # Run the async test generation for this inference using helper method with sampling
+                            # Run the async test generation for this inference with timeout
+                            print(f"   🔄 Making API calls (timeout: {timeout_value} seconds)...")
                             inference_tests = self._run_async_in_jupyter(
-                                self.inferences_to_generations(inference, sampling_strategy=saved_strategy, sampling_value=saved_value)
+                                self.inferences_to_generations(inference, sampling_strategy=saved_strategy, sampling_value=saved_value),
+                                timeout_seconds=timeout_value
                             )
+                            
+                            # Check for cancellation after async operation
+                            if cancellation_flag['cancelled']:
+                                print(f"\n⚠️  Operation cancelled by user after processing {i} inferences")
+                                break
                             
                             # Limit to requested count per inference
                             limited_tests = inference_tests[:tests_count] if tests_count < len(inference_tests) else inference_tests
                             all_tests.extend(limited_tests)
                             
-                            print(f"   Generated {len(limited_tests)} tests")
+                            print(f"   ✅ Generated {len(limited_tests)} tests")
+                            
+                        except TimeoutError as e:
+                            print(f"   ⏰ Timeout generating tests for inference {i}: {str(e)}")
+                            print("   This usually indicates API issues. You can:")
+                            print("     • Click Cancel and retry with fewer inferences")
+                            print("     • Check your internet connection") 
+                            print("     • Verify OpenAI API key and quota")
+                            # Continue to next inference rather than breaking entirely
                             
                         except Exception as e:
+                            if cancellation_flag['cancelled']:
+                                print(f"\n⚠️  Operation cancelled by user")
+                                break
                             print(f"   ❌ Error generating tests for inference {i}: {str(e)}")
                             print("   Skipping this inference. Please check your OpenAI configuration.")
                     
-                    # Store results
-                    self.workflow_data['selected_inferences'] = selected_inferences
-                    self.workflow_data['all_tests'] = all_tests
-                    self.workflow_data['tests_per_inference'] = tests_count
-                    
-                    print(f"\n✅ Generated {len(all_tests)} total test prompts!")
-                    
-                    # Show sample tests
-                    print("\n📋 Sample test prompts:")
-                    for i, test in enumerate(all_tests[:3], 1):
-                        preview = test[:100] + "..." if len(test) > 100 else test
-                        print(f"   {i}. {preview}")
-                    
-                    if len(all_tests) > 3:
-                        print(f"   ... and {len(all_tests) - 3} more tests")
-                    
-                    print("\n➡️  Next: Run Step 5 to review results")
+                    # Store results (even if cancelled partway through)
+                    if all_tests:
+                        self.workflow_data['selected_inferences'] = selected_inferences
+                        self.workflow_data['all_tests'] = all_tests
+                        self.workflow_data['tests_per_inference'] = tests_count
+                        
+                        print(f"\n✅ Generated {len(all_tests)} total test prompts!")
+                        
+                        # Show sample tests
+                        print("\n📋 Sample test prompts:")
+                        for i, test in enumerate(all_tests[:3], 1):
+                            preview = test[:100] + "..." if len(test) > 100 else test
+                            print(f"   {i}. {preview}")
+                        
+                        if len(all_tests) > 3:
+                            print(f"   ... and {len(all_tests) - 3} more tests")
+                        
+                        if not cancellation_flag['cancelled']:
+                            print("\n➡️  Next: Run Step 5 to review results")
+                        else:
+                            print("\n💡 Partial results saved. You can continue with Step 5 or retry generation.")
+                    elif cancellation_flag['cancelled']:
+                        print("\n⚠️  Operation cancelled - no tests were generated")
+                    else:
+                        print("\n❌ No tests were generated")
                     
                 except Exception as e:
                     print(f"❌ Error generating tests: {str(e)}")
+                finally:
+                    # Re-enable buttons
+                    generate_button.disabled = False
+                    cancel_button.disabled = True
+        
+        def on_cancel_clicked(b):
+            cancellation_flag['cancelled'] = True
+            cancel_button.disabled = True
+            with output_area:
+                print("\n🛑 Cancellation requested - stopping after current inference completes...")
         
         generate_button.on_click(on_generate_clicked)
+        cancel_button.on_click(on_cancel_clicked)
         
         print("👆 Configure settings and click 'Generate Tests' above to proceed")
+        print("💡 Features:")
+        print("   🛑 Use 'Cancel' button to stop generation anytime")
+        print("   ⏰ Adjust timeout to handle slow API responses")
+        print("   💾 Partial results saved even if cancelled or timed out")
         return None
 
     def create_test_prompts_interactive(self, default_strategies: list[str] = None):
@@ -2297,6 +2466,8 @@ class TestGenieOrchestrator(Orchestrator):
             return []
         
         try:
+            import numpy as np
+            import pandas as pd
             # Convert test results to DataFrame for prediction
             test_data = []
             for result in test_results:
@@ -2315,7 +2486,47 @@ class TestGenieOrchestrator(Orchestrator):
             test_df = pd.DataFrame(test_data)
             
             # Get predictions from classifier
-            pos_probs, preds = classifier.predict(test_df[['claim', 'inst']])
+            # Handle different classifier types - bypass the problematic predict method
+            sentence_pairs = [[row['claim'], row['inst']] for _, row in test_df.iterrows()]
+            
+            print(f"📊 Making predictions on {len(sentence_pairs)} sentence pairs...")
+            
+            # Use the cross-encoder directly instead of the problematic predict method
+            if hasattr(classifier, 'encoder') and hasattr(classifier.encoder, 'predict'):
+                # For ClaimClassifierCE - use the cross-encoder directly
+                try:
+                    predictions = classifier.encoder.predict(sentence_pairs)
+                except Exception as pred_error:
+                    print(f"❌ Error during classifier.encoder.predict(): {pred_error}")
+                    return test_results
+            elif hasattr(classifier, 'predict'):
+                # For other classifiers, try the regular predict method with sentence pairs
+                try:
+                    predictions = classifier.predict(sentence_pairs)
+                except Exception as pred_error:
+                    print(f"❌ Error during classifier.predict(): {pred_error}")
+                    # If regular predict fails, try with the cross-encoder directly
+                    if hasattr(classifier, 'encoder'):
+                        try:
+                            predictions = classifier.encoder.predict(sentence_pairs)
+                        except Exception as encoder_error:
+                            print(f"❌ Error during classifier.encoder.predict(): {encoder_error}")
+                            return test_results
+                    else:
+                        return test_results
+            else:
+                print("❌ No suitable prediction method found")
+                return test_results
+                
+            # Convert to consistent format
+            if isinstance(predictions[0], (int, float)):
+                # Simple numeric predictions
+                pos_probs = np.array(predictions)
+                preds = (pos_probs > 0.5).astype(int)
+            else:
+                # More complex prediction format  
+                pos_probs = np.array([p[1] if isinstance(p, list) else p for p in predictions])
+                preds = (pos_probs > 0.5).astype(int)
             
             # Add predictions back to test results
             predicted_results = []
@@ -2623,39 +2834,84 @@ class TestGenieOrchestrator(Orchestrator):
                     gen_df.at[idx, 'label'] = label_map.get(latest_annotation['label'])
         
         try:
-            # Prepare data (this adds cross-encoder probabilities)
-            train_df, test_df = classifier.prep_data(
-                gen_df[["claim", "inst", "label"]],
-                remove_claims_with_homogenous_label=False,
-                rebalance=True
-            )
+            import numpy as np
+            
+            # Separate labeled and unlabeled data
+            labeled_data = gen_df[~gen_df['label'].isna()].copy()
+            unlabeled_data = gen_df[gen_df['label'].isna()].copy()
             
             # Fit classifier if requested and we have labeled data
-            if do_fit and len(train_df) > 0:
-                classifier.fit(train_df)
-                self.workflow_data['classifier_state']['training_data'] = train_df
+            if do_fit and len(labeled_data) > 0:
+                print(f"📊 Training classifier on {len(labeled_data)} labeled samples...")
+                
+                # Use the same direct training approach as fit_classifier_on_annotations
+                from sentence_transformers import InputExample
+                from torch.utils.data import DataLoader
+                
+                # Prepare training data directly
+                sentences1 = labeled_data['claim'].astype(str).tolist()
+                sentences2 = labeled_data['inst'].astype(str).tolist()
+                labels = labeled_data['label'].astype(float).tolist()
+                
+                # Create training examples
+                train_examples = []
+                for i in range(len(sentences1)):
+                    example = InputExample(texts=[sentences1[i], sentences2[i]], label=labels[i])
+                    train_examples.append(example)
+                
+                train_dataloader = DataLoader(train_examples, shuffle=True, batch_size=2)
+                
+                # Train the cross-encoder directly (bypasses problematic prep_data method)
+                classifier.encoder.fit(
+                    train_dataloader=train_dataloader,
+                    epochs=1,
+                    warmup_steps=10,
+                    show_progress_bar=False
+                )
+                
+                # Mark classifier as fitted
+                classifier._is_fitted = True
+                self.workflow_data['classifier_state']['training_data'] = labeled_data
             
             # Make predictions on unlabeled data
-            if len(test_df) > 0:
-                probs, preds = classifier.predict(test_df)
+            if len(unlabeled_data) > 0 and classifier._is_fitted:
+                print(f"🔮 Making predictions on {len(unlabeled_data)} unlabeled samples...")
                 
-                # Add predictions back to the full dataframe
-                gen_df["prob"] = gen_df["label"].astype(float)  # Start with labels as probs
-                gen_df["pred"] = gen_df["label"]  # Start with labels as predictions
+                # Create sentence pairs for prediction
+                sentence_pairs = [[row['claim'], row['inst']] for _, row in unlabeled_data.iterrows()]
+                predictions = classifier.predict(sentence_pairs)
                 
-                # Override with classifier predictions for unlabeled data
-                gen_df.loc[test_df.index, "prob"] = probs
-                gen_df.loc[test_df.index, "pred"] = preds
+                # Convert to consistent format
+                if isinstance(predictions[0], (int, float)):
+                    # Simple numeric predictions
+                    probs = np.array(predictions)
+                    preds = (probs > 0.5).astype(int)
+                else:
+                    # More complex prediction format
+                    probs = np.array([p[1] if isinstance(p, list) else p for p in predictions])
+                    preds = (probs > 0.5).astype(int)
+                
+                # Add predictions to unlabeled data
+                unlabeled_data["prob"] = probs
+                unlabeled_data["pred"] = preds
             else:
-                # No unlabeled data to predict
-                gen_df["prob"] = gen_df["label"].astype(float)
-                gen_df["pred"] = gen_df["label"]
+                # No unlabeled data to predict or classifier not fitted
+                unlabeled_data["prob"] = np.nan
+                unlabeled_data["pred"] = np.nan
+            
+            # Add predictions/labels to labeled data
+            if len(labeled_data) > 0:
+                labeled_data["prob"] = labeled_data["label"].astype(float)
+                labeled_data["pred"] = labeled_data["label"]
+            
+            # Combine results
+            result_df = pd.concat([labeled_data, unlabeled_data], ignore_index=True)
             
             # Store results
-            self.workflow_data['classifier_state']['predictions'] = gen_df.to_dict('records')
+            self.workflow_data['classifier_state']['predictions'] = result_df.to_dict('records')
             
-            print(f"✅ Processed {len(gen_df)} test samples with classifier")
-            return gen_df
+            print(f"✅ Processed {len(result_df)} test samples with classifier")
+            return result_df
             
         except Exception as e:
             print(f"❌ Error in fit_and_predict pipeline: {str(e)}")
